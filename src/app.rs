@@ -1,5 +1,6 @@
 //! Application state machine driving Charon's screens.
 
+use crate::browser::FileBrowser;
 use crate::config::{Config, OutputFormat, Verbosity};
 use crate::indicator::DetectionSummary;
 use crate::investigation::{
@@ -48,6 +49,7 @@ pub struct App {
 
     // Investigation wizard
     pub investigate_step: InvestigateStep,
+    pub file_browser: FileBrowser,
     pub input_path: String,
     pub output_dir: String,
     pub detection: Option<DetectionSummary>,
@@ -57,7 +59,7 @@ pub struct App {
     pub progress: ProgressSnapshot,
     pub live_lines: Vec<String>,
     pub output_paths: Vec<PathBuf>,
-    pub investigate_cursor: usize, // for review lists etc.
+    pub investigate_cursor: usize,
     investigation_tx: Option<mpsc::UnboundedReceiver<LiveEvent>>,
     investigation_handle: Option<JoinHandle<()>>,
 
@@ -68,7 +70,6 @@ pub struct App {
 
     // Vendors
     pub vendor_index: usize,
-    /// When enabling a vendor without a key, jump into key entry.
     pub pending_key_for_vendor: Option<String>,
 
     // Color scheme picker
@@ -100,6 +101,7 @@ impl App {
             status_message: "↑↓ navigate · Enter select · q quit".into(),
             menu_index: 0,
             investigate_step: InvestigateStep::InputPath,
+            file_browser: FileBrowser::from_cwd(),
             input_path: String::new(),
             output_dir: default_output_dir(),
             detection: None,
@@ -146,8 +148,7 @@ impl App {
 
     pub fn open_main_menu(&mut self) {
         self.screen = Screen::MainMenu;
-        self.status_message =
-            "↑↓ navigate · Enter select · q quit".into();
+        self.status_message = "↑↓ navigate · Enter select · q quit".into();
     }
 
     pub fn open_investigation(&mut self) {
@@ -159,8 +160,16 @@ impl App {
         self.live_lines.clear();
         self.output_paths.clear();
         self.progress = ProgressSnapshot::default();
-        self.status_message =
-            "Enter path to newline-separated indicator file · Esc back".into();
+        self.file_browser = FileBrowser::from_cwd();
+        self.file_browser.select_best_indicator_file();
+        let found = self.file_browser.indicator_file_count();
+        self.status_message = if found > 0 {
+            format!(
+                "Found {found} indicator file(s) · ↑↓ move · →/Enter open · ← back · Esc menu"
+            )
+        } else {
+            "↑↓ move · →/Enter open dir or select file · ← parent · Esc menu".into()
+        };
     }
 
     pub fn open_api_keys(&mut self) {
@@ -175,8 +184,7 @@ impl App {
     pub fn open_vendors(&mut self) {
         self.screen = Screen::Vendors;
         self.vendor_index = 0;
-        self.status_message =
-            "↑↓ move · Space/Enter toggle · Esc back".into();
+        self.status_message = "↑↓ move · Space/Enter toggle · Esc back".into();
     }
 
     pub fn open_color_scheme(&mut self) {
@@ -186,8 +194,7 @@ impl App {
             .iter()
             .position(|s| *s == self.config.color_scheme)
             .unwrap_or(0);
-        self.status_message =
-            "↑↓ preview · Enter apply & save · Esc cancel".into();
+        self.status_message = "↑↓ preview · Enter apply & save · Esc cancel".into();
     }
 
     pub fn cancel_color_scheme(&mut self) {
@@ -219,6 +226,49 @@ impl App {
         if let Some(scheme) = ColorScheme::all().get(self.color_scheme_index).copied() {
             self.config.color_scheme = scheme;
         }
+    }
+
+    /// Ranger: enter dir, or select file.
+    pub fn browser_confirm(&mut self) {
+        let Some(entry) = self.file_browser.selected_entry().cloned() else {
+            self.status_message = "No entry selected".into();
+            return;
+        };
+        if entry.is_dir {
+            self.file_browser.enter();
+            self.file_browser.select_best_indicator_file();
+            self.update_browser_status();
+            return;
+        }
+        self.input_path = entry.path.display().to_string();
+        self.submit_input_path();
+    }
+
+    pub fn browser_enter_dir(&mut self) {
+        let Some(entry) = self.file_browser.selected_entry() else {
+            return;
+        };
+        if entry.is_dir {
+            self.file_browser.enter();
+            self.file_browser.select_best_indicator_file();
+            self.update_browser_status();
+        }
+    }
+
+    pub fn browser_leave_dir(&mut self) {
+        if self.file_browser.leave() {
+            self.update_browser_status();
+        }
+    }
+
+    pub fn update_browser_status(&mut self) {
+        let found = self.file_browser.indicator_file_count();
+        let cwd = self.file_browser.cwd.display();
+        self.status_message = if found > 0 {
+            format!("{cwd}  ·  {found} indicator file(s) detected · ← → ↑ ↓ · Enter")
+        } else {
+            format!("{cwd}  ·  ← → ↑ ↓ · Enter select · Esc back")
+        };
     }
 
     pub fn submit_input_path(&mut self) {
@@ -255,7 +305,6 @@ impl App {
         self.live_lines.clear();
         self.status_message = "Investigation running… · Esc cancels view (task continues)".into();
 
-        // Persist chosen defaults for next time.
         self.config.defaults.format = self.selected_format();
         self.config.defaults.verbosity = self.selected_verbosity();
         let _ = self.config.save();
@@ -307,10 +356,6 @@ impl App {
         }
     }
 
-    pub fn vendor_ids(&self) -> Vec<&'static str> {
-        all_vendors().iter().map(|v| v.id()).collect()
-    }
-
     pub fn begin_enter_api_key(&mut self, vendor_id: &str) {
         self.pending_key_for_vendor = Some(vendor_id.to_string());
         self.api_key_input.clear();
@@ -332,7 +377,6 @@ impl App {
                 self.status_message = format!("API key saved for {vendor_id}");
             }
         } else {
-            // From API key list screen
             let vendors = all_vendors();
             if let Some(v) = vendors.get(self.api_key_index) {
                 let key = self.api_key_input.trim().to_string();

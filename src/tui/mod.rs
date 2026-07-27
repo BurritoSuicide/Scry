@@ -66,9 +66,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
 fn is_text_entry(app: &App) -> bool {
     matches!(
-        (app.screen, app.investigate_step, app.api_key_mode),
-        (Screen::Investigation, InvestigateStep::InputPath, _)
-            | (Screen::ApiKeys, _, ApiKeyMode::EnterKey)
+        (app.screen, app.api_key_mode),
+        (Screen::ApiKeys, ApiKeyMode::EnterKey)
     )
 }
 
@@ -107,16 +106,19 @@ fn handle_investigation(app: &mut App, key: KeyEvent) {
     match app.investigate_step {
         InvestigateStep::InputPath => match key.code {
             KeyCode::Esc => app.open_main_menu(),
-            KeyCode::Enter => app.submit_input_path(),
-            KeyCode::Backspace => {
-                app.input_path.pop();
+            KeyCode::Up | KeyCode::Char('k') => app.file_browser.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => app.file_browser.move_down(),
+            KeyCode::Right | KeyCode::Char('l') => app.browser_enter_dir(),
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+                app.browser_leave_dir();
             }
-            KeyCode::Char(c) => app.input_path.push(c),
+            KeyCode::Enter => app.browser_confirm(),
             _ => {}
         },
         InvestigateStep::ReviewDetection => match key.code {
             KeyCode::Esc => {
                 app.investigate_step = InvestigateStep::InputPath;
+                app.update_browser_status();
             }
             KeyCode::Enter => {
                 app.investigate_step = InvestigateStep::OutputFormat;

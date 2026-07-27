@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::widgets::{panel_block, progress_label, sparkline_bar};
+use super::widgets::{panel_block, progress_label};
 use crate::app::{ApiKeyMode, App, InvestigateStep, Screen};
 use crate::config::{OutputFormat, Verbosity};
 use crate::investigation::InvestigationStatus;
@@ -68,41 +68,33 @@ fn draw_progress_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palett
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
-        .split(inner);
-
     let frac = app.progress.fraction();
+    let status = match &app.progress.status {
+        InvestigationStatus::Idle => "idle",
+        InvestigationStatus::Preparing => "preparing",
+        InvestigationStatus::Running => "running",
+        InvestigationStatus::WaitingRateLimit { .. } => "rate-limited",
+        InvestigationStatus::Completed => "completed",
+        InvestigationStatus::Failed(_) => "failed",
+    };
     let label = progress_label(
         app.progress.completed_queries,
         app.progress.total_queries,
         app.progress.eta,
+        status,
     );
+
+    // Single full-width gauge — filled and empty share the same palette
+    // (progress / progress_bg). Avoid a second accent-colored meter on the side.
     let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(theme.progress).bg(theme.progress_bg))
+        .gauge_style(
+            Style::default()
+                .fg(theme.progress)
+                .bg(theme.progress_bg),
+        )
         .ratio(frac.clamp(0.0, 1.0))
         .label(label);
-    frame.render_widget(gauge, cols[0]);
-
-    let status = match &app.progress.status {
-        InvestigationStatus::Idle => "idle".to_string(),
-        InvestigationStatus::Preparing => "preparing…".into(),
-        InvestigationStatus::Running => "running".into(),
-        InvestigationStatus::WaitingRateLimit { vendor, wait } => {
-            format!("wait {vendor} {:.0}s", wait.as_secs_f64())
-        }
-        InvestigationStatus::Completed => "completed".into(),
-        InvestigationStatus::Failed(_) => "failed".into(),
-    };
-    let bar = sparkline_bar(frac, cols[1].width.saturating_sub(2) as usize);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("{bar} "), theme.accent_style()),
-            Span::styled(status, theme.muted_style()),
-        ])),
-        cols[1],
-    );
+    frame.render_widget(gauge, inner);
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
@@ -247,29 +239,90 @@ fn draw_color_scheme(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palett
     frame.render_widget(List::new(items), area);
 }
 
+fn draw_file_browser(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(3)])
+        .split(area);
+
+    let found = app.file_browser.indicator_file_count();
+    let header = vec![
+        Line::from(vec![
+            Span::styled("cwd ", theme.muted_style()),
+            Span::styled(
+                app.file_browser.cwd.display().to_string(),
+                theme.accent_style(),
+            ),
+        ]),
+        Line::from(Span::styled(
+            if found > 0 {
+                format!(
+                    "{found} file(s) look like indicator lists (highlighted) · ← → navigate"
+                )
+            } else {
+                "← parent · → enter dir · Enter select file · auto-scans .txt/.csv/.list"
+                    .into()
+            },
+            theme.muted_style(),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(header), rows[0]);
+
+    let height = rows[1].height as usize;
+    let selected = app.file_browser.selected;
+    let start = selected.saturating_sub(height.saturating_sub(1) / 2);
+    let end = (start + height).min(app.file_browser.entries.len());
+    let start = end.saturating_sub(height).min(start);
+
+    let items: Vec<ListItem> = app.file_browser.entries[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, entry)| {
+            let i = start + offset;
+            let selected = i == app.file_browser.selected;
+            let marker = if entry.name == ".." {
+                "↑"
+            } else if entry.is_dir {
+                "▸"
+            } else if entry.looks_like_indicators() {
+                "●"
+            } else {
+                " "
+            };
+            let prefix = if selected { "◆" } else { " " };
+            let style = if selected {
+                theme.selected()
+            } else if entry.looks_like_indicators() {
+                theme.ok_style()
+            } else if entry.is_dir {
+                theme.accent_style()
+            } else {
+                theme.text_style()
+            };
+            ListItem::new(Span::styled(
+                format!("{prefix} {marker} {}", entry.label()),
+                style,
+            ))
+        })
+        .collect();
+
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "No text files or directories here.",
+                theme.muted_style(),
+            )),
+            rows[1],
+        );
+    } else {
+        frame.render_widget(List::new(items), rows[1]);
+    }
+}
+
 fn draw_investigation(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
     match app.investigate_step {
         InvestigateStep::InputPath => {
-            let lines = vec![
-                Line::from(Span::styled(
-                    "Input file (newline-separated indicators)",
-                    theme.title_style(),
-                )),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled(" path ▸ ", theme.accent_style()),
-                    Span::styled(
-                        format!("{}█", app.input_path),
-                        theme.text_style(),
-                    ),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Types auto-detected: email · ipv4/ipv6 · ja4 · md5/sha1/sha256/sha512",
-                    theme.muted_style(),
-                )),
-            ];
-            frame.render_widget(Paragraph::new(lines), area);
+            draw_file_browser(frame, area, app, theme);
         }
         InvestigateStep::ReviewDetection => {
             let mut lines = vec![Line::from(Span::styled(
