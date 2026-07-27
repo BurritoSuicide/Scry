@@ -1,0 +1,10 @@
+# Charon
+
+/target/
+.cargo-home/
+**/*.rs.bk
+.idea/
+.vscode/
+*.swp
+.DS_Store
+charon-output/
