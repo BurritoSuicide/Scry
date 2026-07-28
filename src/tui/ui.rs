@@ -10,6 +10,7 @@ use crate::app::{ApiKeyMode, App, InvestigateStep, OptionsMode, RateEditField, S
 use crate::config::{OutputFormat, Verbosity};
 use crate::indicator::IndicatorType;
 use crate::investigation::InvestigationStatus;
+use crate::map::{render_flat, render_globe, MapCell, MapMode, MapSource};
 use crate::rate_limit::UsageProfile;
 use crate::theme::{ColorScheme, Palette};
 use crate::threat::TagKind;
@@ -43,6 +44,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             | Screen::EditInput
             | Screen::EditInputBrowse
             | Screen::EditInputNewName
+            | Screen::WorldMapSource
+            | Screen::WorldMapBrowse
+            | Screen::WorldMap
     );
 
     let mut areas = FxAreas {
@@ -176,7 +180,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
 }
 
 fn draw_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Palette) {
-    // Full-width workspace for viewers / editors.
+    // Full-width workspace for viewers / editors / world map.
     if matches!(
         app.screen,
         Screen::ViewOutput
@@ -184,8 +188,19 @@ fn draw_body(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Palette) {
             | Screen::EditInput
             | Screen::EditInputBrowse
             | Screen::EditInputNewName
+            | Screen::WorldMapSource
+            | Screen::WorldMapBrowse
+            | Screen::WorldMap
     ) {
-        draw_center_panel(frame, area, app, theme);
+        if matches!(
+            app.screen,
+            Screen::WorldMapSource | Screen::WorldMapBrowse | Screen::WorldMap
+        ) {
+            // World map needs the full vertical space (no live-results strip).
+            draw_workspace(frame, area, app, theme);
+        } else {
+            draw_center_panel(frame, area, app, theme);
+        }
         return;
     }
 
@@ -334,8 +349,15 @@ fn draw_workspace(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Palet
         Screen::ColorScheme => " color scheme ",
         Screen::ViewOutputBrowse => " view output ",
         Screen::ViewOutput => " view output ",
-        Screen::EditInputBrowse => " add / edit input ",
-        Screen::EditInput | Screen::EditInputNewName => " add / edit input ",
+        Screen::EditInputBrowse => " edit input ",
+        Screen::EditInput | Screen::EditInputNewName => {
+            if app.editing_watchlist {
+                " watch list "
+            } else {
+                " edit input "
+            }
+        }
+        Screen::WorldMapSource | Screen::WorldMapBrowse | Screen::WorldMap => " world map ",
     };
     let focused = app.screen != Screen::MainMenu;
     let block = panel_block(title, focused, theme);
@@ -367,6 +389,16 @@ fn draw_workspace(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: Palet
         ),
         Screen::EditInput => draw_text_editor(frame, inner, app, theme),
         Screen::EditInputNewName => draw_new_file_prompt(frame, inner, app, theme),
+        Screen::WorldMapSource => draw_world_map_source(frame, inner, app, theme),
+        Screen::WorldMapBrowse => {
+            let hint = if app.map_browse_input {
+                "Indicator input files for map"
+            } else {
+                "Investigation output files for map"
+            };
+            draw_file_browser(frame, inner, &app.map_browser, hint, theme);
+        }
+        Screen::WorldMap => draw_world_map(frame, inner, app, theme),
     }
 }
 
@@ -394,7 +426,11 @@ fn draw_workspace_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Pale
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "View Output · Add/Edit Input · Run Investigation from the menu.",
+            "Investigate · Edit Input · Watch List · World Map · Options from the menu.",
+            theme.muted_style(),
+        )),
+        Line::from(Span::styled(
+            "Headless: scry run -i indicators.txt",
             theme.muted_style(),
         )),
     ];
@@ -778,10 +814,9 @@ fn draw_options(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
                 .constraints([Constraint::Length(3), Constraint::Min(3)])
                 .split(area);
             frame.render_widget(header, chunks[0]);
-            let items: Vec<ListItem> = App::options_items()
-                .iter()
-                .enumerate()
-                .map(|(i, label)| {
+            let items: Vec<ListItem> = (0..App::options_item_count())
+                .map(|i| {
+                    let label = app.options_item_label(i);
                     let selected = i == app.options_index;
                     let prefix = if selected { "◆ " } else { "  " };
                     let style = if selected {
@@ -1409,4 +1444,197 @@ fn draw_new_file_prompt(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Pal
         )),
     ];
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_world_map_source(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
+    let last = &app.config.last_investigation;
+    let last_hint = match (
+        last.input_path.as_ref().map(|p| p.display().to_string()),
+        last.output_paths.first().map(|p| p.display().to_string()),
+    ) {
+        (Some(inp), _) => format!("last input: {inp}"),
+        (None, Some(out)) => format!("last output: {out}"),
+        (None, None) => "no last investigation yet".into(),
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Plot IP geolocations on a rotating globe or flat world map",
+            theme.text_style(),
+        )),
+        Line::from(Span::styled(last_hint, theme.muted_style())),
+        Line::from(""),
+    ];
+
+    for (i, source) in MapSource::all().iter().enumerate() {
+        let selected = i == app.map_source_index;
+        let marker = if selected { "▸ " } else { "  " };
+        let style = if selected {
+            theme.selected()
+        } else {
+            theme.text_style()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker, theme.accent_style()),
+            Span::styled(source.label(), style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter load · Esc menu",
+        theme.muted_style(),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_world_map(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
+        .split(area);
+
+    draw_world_map_canvas(frame, cols[0], app, theme);
+    draw_world_map_sidebar(frame, cols[1], app, theme);
+}
+
+fn draw_world_map_canvas(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
+    let session = &app.map_session;
+    let mode_label = session.mode.label();
+    let header = format!(
+        "{} · {} · {}",
+        mode_label,
+        session.source_label,
+        session.progress_label()
+    );
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(header, theme.accent_style())),
+        rows[0],
+    );
+
+    let width = rows[1].width as usize;
+    let height = rows[1].height as usize;
+    let located = session.located_points();
+    let cells = match session.mode {
+        MapMode::Globe => render_globe(
+            width,
+            height,
+            session.rotation_radians(),
+            session.aspect_ratio,
+            &located,
+        ),
+        MapMode::Flat => render_flat(width, height, &located),
+    };
+
+    let lines: Vec<Line> = cells
+        .iter()
+        .map(|row| {
+            let spans: Vec<Span> = row
+                .iter()
+                .map(|cell| {
+                    let (ch, style) = match cell {
+                        MapCell::Empty => (' ', theme.muted_style()),
+                        MapCell::Ocean => ('·', Style::default().fg(theme.muted)),
+                        MapCell::Land => ('█', Style::default().fg(theme.ok)),
+                        MapCell::Coast => ('▒', Style::default().fg(theme.accent)),
+                        MapCell::Marker => ('*', Style::default().fg(theme.danger).add_modifier(Modifier::BOLD)),
+                    };
+                    Span::styled(ch.to_string(), style)
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), rows[1]);
+}
+
+fn draw_world_map_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
+    let session = &app.map_session;
+    let block = panel_block(" ips ", true, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(3), Constraint::Length(2)])
+        .split(inner);
+
+    let path = session
+        .path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "—".into());
+    let meta = vec![
+        Line::from(Span::styled(
+            truncate_path(&path, chunks[0].width as usize),
+            theme.muted_style(),
+        )),
+        Line::from(Span::styled(
+            if session.loading {
+                "geocoding…"
+            } else if let Some(err) = &session.error {
+                err.as_str()
+            } else {
+                "ready"
+            },
+            if session.error.is_some() {
+                theme.warn_style()
+            } else {
+                theme.muted_style()
+            },
+        )),
+        Line::from(Span::styled(
+            session.progress_label(),
+            theme.text_style(),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(meta), chunks[0]);
+
+    let visible = chunks[1].height as usize;
+    let scroll = session.list_scroll.min(session.points.len().saturating_sub(1));
+    let items: Vec<ListItem> = session
+        .points
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(i, p)| {
+            let selected = i == scroll;
+            let style = if selected {
+                theme.selected()
+            } else if p.valid {
+                theme.text_style()
+            } else {
+                theme.muted_style()
+            };
+            ListItem::new(Line::from(Span::styled(p.label(), style)))
+        })
+        .collect();
+    frame.render_widget(List::new(items), chunks[1]);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "Tab/m toggle · ↑↓ list · Esc",
+            theme.muted_style(),
+        )),
+        chunks[2],
+    );
+}
+
+fn truncate_path(path: &str, width: usize) -> String {
+    if width == 0 || path.len() <= width {
+        return path.to_string();
+    }
+    if width <= 1 {
+        return "…".into();
+    }
+    format!("…{}", &path[path.len().saturating_sub(width - 1)..])
 }

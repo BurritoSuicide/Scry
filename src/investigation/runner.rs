@@ -1,6 +1,6 @@
 use crate::config::{Config, OutputFormat, Verbosity};
 use crate::error::{ScryError, Result};
-use crate::indicator::{detect_file, DetectionSummary, Indicator};
+use crate::indicator::{detect_file_with, DetectionSummary, DetectOptions, Indicator};
 use crate::output;
 use crate::rate_limit::RateLimiter;
 use crate::vendors::{selected_vendors, VendorFit, VendorHandle, VendorResult};
@@ -118,11 +118,12 @@ async fn run_inner(
     };
     let _ = tx.send(LiveEvent::Progress(snap.clone()));
 
-    let summary = detect_file(&request.input_path)?;
+    let opts = DetectOptions::from_flags(config.normalize_inputs);
+    let summary = detect_file_with(&request.input_path, opts)?;
     let vendors = selected_vendors(&config.selected_vendors);
     if vendors.is_empty() {
         return Err(ScryError::msg(
-            "no vendors selected — enable at least one in List / Select Vendors",
+            "no vendors selected — enable at least one under Vendors",
         ));
     }
 
@@ -357,7 +358,8 @@ fn estimate_eta(
 
 /// Preview detection + vendor fit without running queries (for the TUI wizard).
 pub fn preview_fit(config: &Config, path: &Path) -> Result<(DetectionSummary, Vec<VendorFit>)> {
-    let summary = detect_file(path)?;
+    let opts = DetectOptions::from_flags(config.normalize_inputs);
+    let summary = detect_file_with(path, opts)?;
     let present = summary.known_types();
     let fits = selected_vendors(&config.selected_vendors)
         .into_iter()

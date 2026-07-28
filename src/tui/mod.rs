@@ -26,11 +26,12 @@ pub async fn run<B: ratatui::backend::Backend>(
 ) -> Result<()> {
     loop {
         app.poll_investigation();
+        app.poll_world_map();
         terminal.draw(|frame| draw(frame, app))?;
 
         match events.next()? {
             AppEvent::Tick => {
-                // Redraw so tachyonfx ambient animations keep advancing.
+                // Redraw so tachyonfx ambient animations / globe rotation keep advancing.
             }
             AppEvent::Key(key) => {
                 if handle_key(app, key) {
@@ -79,6 +80,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         Screen::EditInputBrowse => handle_edit_input_browse(app, key),
         Screen::EditInput => handle_edit_input(app, key),
         Screen::EditInputNewName => handle_edit_input_new_name(app, key),
+        Screen::WorldMapSource => handle_world_map_source(app, key),
+        Screen::WorldMapBrowse => handle_world_map_browse(app, key),
+        Screen::WorldMap => handle_world_map(app, key),
     }
     false
 }
@@ -181,6 +185,7 @@ fn handle_investigation(app: &mut App, key: KeyEvent) {
                 app.browser_leave_dir();
             }
             KeyCode::Enter => app.browser_confirm(),
+            KeyCode::Char('w') => app.use_watchlist_for_investigation(),
             _ => {}
         },
         InvestigateStep::ReviewDetection => match key.code {
@@ -347,7 +352,7 @@ fn handle_vendors(app: &mut App, key: KeyEvent) {
 fn handle_profiles(app: &mut App, key: KeyEvent) {
     let n = UsageProfile::all().len();
     match key.code {
-        KeyCode::Esc => app.open_main_menu(),
+        KeyCode::Esc => app.leave_nested_option(),
         KeyCode::Up | KeyCode::Char('k') => {
             app.profile_index = app.profile_index.checked_sub(1).unwrap_or(n - 1);
         }
@@ -362,7 +367,7 @@ fn handle_profiles(app: &mut App, key: KeyEvent) {
 fn handle_options(app: &mut App, key: KeyEvent) {
     match app.options_mode {
         OptionsMode::List => {
-            let n = App::options_items().len().max(1);
+            let n = App::options_item_count().max(1);
             match key.code {
                 KeyCode::Esc => app.open_main_menu(),
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -371,18 +376,14 @@ fn handle_options(app: &mut App, key: KeyEvent) {
                 KeyCode::Down | KeyCode::Char('j') => {
                     app.options_index = (app.options_index + 1) % n;
                 }
-                KeyCode::Enter => match app.options_index {
-                    0 => app.begin_rate_limit_warning(),
-                    1 => app.clear_all_rate_overrides(),
-                    _ => {}
-                },
+                KeyCode::Enter | KeyCode::Char(' ') => app.activate_options_item(),
                 _ => {}
             }
         }
         OptionsMode::RateWarning => match key.code {
             KeyCode::Esc => {
                 app.options_mode = OptionsMode::List;
-                app.status_message = "↑↓ · Enter · Esc back".into();
+                app.status_message = "↑↓ · Enter · Esc menu".into();
             }
             KeyCode::Enter => app.open_rate_vendor_list(),
             _ => {}
@@ -392,7 +393,7 @@ fn handle_options(app: &mut App, key: KeyEvent) {
             match key.code {
                 KeyCode::Esc => {
                     app.options_mode = OptionsMode::List;
-                    app.status_message = "↑↓ · Enter · Esc back".into();
+                    app.status_message = "↑↓ · Enter · Esc menu".into();
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     app.rate_vendor_index =
@@ -635,6 +636,19 @@ fn handle_edit_input(app: &mut App, key: KeyEvent) {
         }
         return;
     }
+    // Ctrl+N normalize & dedup
+    if key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.normalize_editor_contents();
+        return;
+    }
+    // Ctrl+I investigate watch list
+    if key.code == KeyCode::Char('i')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && app.editing_watchlist
+    {
+        app.investigate_watch_list();
+        return;
+    }
 
     match key.code {
         KeyCode::Esc => app.close_editor(false),
@@ -694,6 +708,68 @@ fn handle_edit_input(app: &mut App, key: KeyEvent) {
                 ed.insert_char(c);
                 ed.ensure_visible(visible);
                 app.editor_discard_armed = false;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_world_map_source(app: &mut App, key: KeyEvent) {
+    let n = crate::map::MapSource::all().len();
+    match key.code {
+        KeyCode::Esc => app.open_main_menu(),
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.map_source_index = app.map_source_index.checked_sub(1).unwrap_or(n - 1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.map_source_index = (app.map_source_index + 1) % n;
+        }
+        KeyCode::Enter => app.activate_world_map_source(),
+        _ => {}
+    }
+}
+
+fn handle_world_map_browse(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.open_world_map_source(),
+        KeyCode::Up | KeyCode::Char('k') => app.map_browser.move_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.map_browser.move_down(),
+        KeyCode::Right | KeyCode::Char('l') => {
+            if app
+                .map_browser
+                .selected_entry()
+                .is_some_and(|e| e.is_dir)
+            {
+                app.map_browser.enter();
+                if app.map_browse_input {
+                    app.map_browser.select_best_indicator_file();
+                }
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+            if app.map_browser.leave() && app.map_browse_input {
+                app.map_browser.select_best_indicator_file();
+            }
+        }
+        KeyCode::Enter => app.confirm_world_map_browse(),
+        _ => {}
+    }
+}
+
+fn handle_world_map(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.map_session.abort_geocode();
+            app.open_world_map_source();
+        }
+        KeyCode::Tab | KeyCode::Char('m') => app.toggle_map_mode(),
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.map_session.list_scroll = app.map_session.list_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let max = app.map_session.points.len().saturating_sub(1);
+            if app.map_session.list_scroll < max {
+                app.map_session.list_scroll += 1;
             }
         }
         _ => {}

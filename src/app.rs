@@ -1,11 +1,15 @@
 //! Application state machine driving Scry's screens.
 
 use crate::browser::FileBrowser;
-use crate::config::{Config, OutputFormat, Verbosity};
+use crate::config::{Config, LastInvestigation, OutputFormat, Verbosity};
 use crate::editor::TextEditor;
 use crate::indicator::{DetectionSummary, IndicatorType};
 use crate::investigation::{
     preview_fit, InvestigationRequest, InvestigationStatus, LiveEvent, ProgressSnapshot,
+};
+use crate::map::{
+    extract_ips_from_path, geocode_ips, resolve_last_investigation_path, GeoPoint, MapSession,
+    MapSource, DEFAULT_GEOCODE_BASE,
 };
 use crate::rate_limit::{RateLimitOverride, RateLimitSpec, UsageProfile};
 use crate::theme::ColorScheme;
@@ -14,6 +18,7 @@ use crate::tui::fx::FxEngine;
 use crate::vendors::{all_vendors, vendors_for_type, VendorFit};
 use crate::viewer::FileViewer;
 use std::path::PathBuf;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -32,6 +37,12 @@ pub enum Screen {
     EditInput,
     /// Prompt for a new input filename.
     EditInputNewName,
+    /// Pick World Map data source.
+    WorldMapSource,
+    /// Browse for a World Map input or output file.
+    WorldMapBrowse,
+    /// Active World Map visualization.
+    WorldMap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +156,17 @@ pub struct App {
     pub view_visible_rows: usize,
     /// Second Esc discards unsaved editor changes.
     pub editor_discard_armed: bool,
+    /// When true, Esc/apply from Profiles or ColorScheme returns to Options.
+    pub options_nest: bool,
+    /// True while editing the persistent watch-list file.
+    pub editing_watchlist: bool,
+
+    // World map
+    pub map_source_index: usize,
+    /// When browsing for map data: true = input file, false = output file.
+    pub map_browse_input: bool,
+    pub map_browser: FileBrowser,
+    pub map_session: MapSession,
 }
 
 impl App {
@@ -215,19 +237,25 @@ impl App {
             new_file_name: String::new(),
             view_visible_rows: 20,
             editor_discard_armed: false,
+            options_nest: false,
+            editing_watchlist: false,
+            map_source_index: 0,
+            map_browse_input: true,
+            map_browser: FileBrowser::from_cwd(),
+            map_session: MapSession::default(),
         }
     }
 
     pub fn menu_items() -> &'static [&'static str] {
         &[
-            "Run OSINT Investigation",
+            "Investigate",
             "View Output",
-            "Add / Edit Input",
-            "Add / Remove / Change API Key",
-            "List / Select Vendors",
-            "Usage Profile",
+            "Edit Input",
+            "API Keys",
+            "Vendors",
+            "Watch List",
+            "World Map",
             "Options",
-            "Color Scheme",
             "Quit",
         ]
     }
@@ -264,10 +292,10 @@ impl App {
         let found = self.file_browser.indicator_file_count();
         self.status_message = if found > 0 {
             format!(
-                "Found {found} indicator file(s) · ↑↓ move · →/Enter open · ← back · Esc menu"
+                "Found {found} indicator file(s) · ↑↓ · Enter · w watch list · Esc menu"
             )
         } else {
-            "↑↓ move · →/Enter open dir or select file · ← parent · Esc menu".into()
+            "↑↓ · Enter select · w watch list · Esc menu".into()
         };
     }
 
@@ -301,7 +329,8 @@ impl App {
         self.screen = Screen::Options;
         self.options_mode = OptionsMode::List;
         self.options_index = 0;
-        self.status_message = "↑↓ · Enter · Esc back".into();
+        self.options_nest = false;
+        self.status_message = "↑↓ · Enter · Esc menu".into();
     }
 
     pub fn open_color_scheme(&mut self) {
@@ -316,7 +345,16 @@ impl App {
 
     pub fn cancel_color_scheme(&mut self) {
         self.config.color_scheme = self.color_scheme_backup;
-        self.open_main_menu();
+        self.leave_nested_option();
+    }
+
+    pub fn leave_nested_option(&mut self) {
+        if self.options_nest {
+            self.options_nest = false;
+            self.open_options();
+        } else {
+            self.open_main_menu();
+        }
     }
 
     pub fn activate_menu_item(&mut self) {
@@ -326,11 +364,174 @@ impl App {
             2 => self.open_edit_input(),
             3 => self.open_api_keys(),
             4 => self.open_vendors(),
-            5 => self.open_profiles(),
-            6 => self.open_options(),
-            7 => self.open_color_scheme(),
+            5 => self.open_watch_list(),
+            6 => self.open_world_map_source(),
+            7 => self.open_options(),
             8 => self.should_quit = true,
             _ => {}
+        }
+    }
+
+    pub fn open_watch_list(&mut self) {
+        match Config::ensure_watchlist() {
+            Ok(path) => match TextEditor::open(&path) {
+                Ok(mut ed) => {
+                    ed.status =
+                        "watch list · Ctrl+N normalize/dedup · Ctrl+S save · Ctrl+I investigate · Esc back"
+                            .into();
+                    self.text_editor = Some(ed);
+                    self.editing_watchlist = true;
+                    self.editor_discard_armed = false;
+                    self.screen = Screen::EditInput;
+                    self.status_message =
+                        "Editing watch list · Ctrl+S save · Ctrl+I investigate · Esc back".into();
+                }
+                Err(e) => {
+                    self.status_message = format!("Failed to open watch list: {e}");
+                }
+            },
+            Err(e) => {
+                self.status_message = format!("Watch list path error: {e}");
+            }
+        }
+    }
+
+    pub fn investigate_watch_list(&mut self) {
+        match Config::ensure_watchlist() {
+            Ok(path) => {
+                if let Some(ed) = self.text_editor.as_mut() {
+                    if ed.dirty {
+                        if let Err(e) = ed.save() {
+                            self.status_message = format!("Save watch list first: {e}");
+                            return;
+                        }
+                    }
+                }
+                self.editing_watchlist = false;
+                self.text_editor = None;
+                self.open_investigation();
+                self.input_path = path.display().to_string();
+                self.submit_input_path();
+            }
+            Err(e) => {
+                self.status_message = format!("Watch list error: {e}");
+            }
+        }
+    }
+
+    pub fn open_world_map_source(&mut self) {
+        self.map_session.abort_geocode();
+        self.screen = Screen::WorldMapSource;
+        self.map_source_index = 0;
+        self.status_message =
+            "↑↓ choose source · Enter · Esc menu".into();
+    }
+
+    pub fn activate_world_map_source(&mut self) {
+        let source = MapSource::all()[self.map_source_index];
+        match source {
+            MapSource::LastInvestigation => self.load_world_map_from_last(),
+            MapSource::InputFile => {
+                self.map_browse_input = true;
+                self.map_browser = FileBrowser::from_cwd();
+                self.map_browser.select_best_indicator_file();
+                self.screen = Screen::WorldMapBrowse;
+                self.status_message =
+                    "Pick input file · ↑↓ · Enter · Esc back".into();
+            }
+            MapSource::OutputFile => {
+                self.map_browse_input = false;
+                let dir = PathBuf::from(self.output_dir.trim());
+                let _ = std::fs::create_dir_all(&dir);
+                self.map_browser = FileBrowser::new(dir);
+                self.screen = Screen::WorldMapBrowse;
+                self.status_message =
+                    "Pick output file · ↑↓ · Enter · Esc back".into();
+            }
+        }
+    }
+
+    pub fn load_world_map_from_last(&mut self) {
+        let last = &self.config.last_investigation;
+        let Some(path) = resolve_last_investigation_path(last) else {
+            self.status_message =
+                "No last investigation saved yet — run one first, or pick a file".into();
+            return;
+        };
+        self.start_world_map(path, "Last investigation");
+    }
+
+    pub fn confirm_world_map_browse(&mut self) {
+        let Some(entry) = self.map_browser.selected_entry().cloned() else {
+            return;
+        };
+        if entry.is_dir {
+            self.map_browser.enter();
+            if self.map_browse_input {
+                self.map_browser.select_best_indicator_file();
+            }
+            return;
+        }
+        let label = if self.map_browse_input {
+            "Input file"
+        } else {
+            "Output file"
+        };
+        self.start_world_map(entry.path, label);
+    }
+
+    pub fn start_world_map(&mut self, path: PathBuf, source_label: &str) {
+        self.map_session.abort_geocode();
+
+        let ips = match extract_ips_from_path(&path) {
+            Ok(ips) => ips,
+            Err(e) => {
+                self.status_message = e;
+                return;
+            }
+        };
+
+        let total = ips.len();
+        let pending: Vec<GeoPoint> = ips.iter().map(GeoPoint::pending).collect();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = geocode_ips(ips, DEFAULT_GEOCODE_BASE.to_string(), tx);
+
+        self.map_session = MapSession {
+            mode: self.map_session.mode,
+            source_label: source_label.to_string(),
+            path: Some(path),
+            points: pending,
+            total_ips: total,
+            located: 0,
+            failed: 0,
+            list_scroll: 0,
+            started: Instant::now(),
+            rotation_period_secs: 30.0,
+            aspect_ratio: 2.0,
+            loading: true,
+            error: None,
+            geocode_rx: Some(rx),
+            geocode_handle: Some(handle),
+        };
+        self.screen = Screen::WorldMap;
+        self.status_message = format!(
+            "Locating {total} IP(s) · Tab toggle globe/map · Esc back"
+        );
+    }
+
+    pub fn toggle_map_mode(&mut self) {
+        self.map_session.mode = self.map_session.mode.toggle();
+        self.status_message = format!(
+            "{} · Tab toggle · Esc back · {}",
+            self.map_session.mode.label(),
+            self.map_session.progress_label()
+        );
+    }
+
+    pub fn poll_world_map(&mut self) {
+        if self.screen == Screen::WorldMap {
+            self.map_session.poll_geocode();
         }
     }
 
@@ -345,6 +546,7 @@ impl App {
     }
 
     pub fn open_edit_input(&mut self) {
+        self.editing_watchlist = false;
         self.input_browser = FileBrowser::from_cwd();
         self.input_browser.select_best_indicator_file();
         self.text_editor = None;
@@ -437,8 +639,48 @@ impl App {
         }
         self.editor_discard_armed = false;
         self.text_editor = None;
-        self.screen = Screen::EditInputBrowse;
-        self.status_message = "↑↓ · Enter edit · n new file · Esc menu".into();
+        if self.editing_watchlist {
+            self.editing_watchlist = false;
+            self.open_main_menu();
+        } else {
+            self.screen = Screen::EditInputBrowse;
+            self.status_message = "↑↓ · Enter edit · n new file · Esc menu".into();
+        }
+    }
+
+    pub fn normalize_editor_contents(&mut self) {
+        let Some(ed) = self.text_editor.as_mut() else {
+            return;
+        };
+        let (new_lines, dupes) =
+            crate::indicator::normalize_and_dedup_lines(&ed.lines);
+        let before = ed.lines.len();
+        ed.lines = if new_lines.is_empty() {
+            vec![String::new()]
+        } else {
+            new_lines
+        };
+        ed.cursor_row = ed.cursor_row.min(ed.lines.len().saturating_sub(1));
+        ed.cursor_col = 0;
+        ed.dirty = true;
+        ed.status = format!(
+            "Normalized · {} → {} line(s) · {dupes} duplicate(s) removed · Ctrl+S save",
+            before,
+            ed.lines.iter().filter(|l| !l.trim().is_empty()).count()
+        );
+        self.status_message = ed.status.clone();
+    }
+
+    pub fn use_watchlist_for_investigation(&mut self) {
+        match Config::ensure_watchlist() {
+            Ok(path) => {
+                self.input_path = path.display().to_string();
+                self.submit_input_path();
+            }
+            Err(e) => {
+                self.status_message = format!("Watch list error: {e}");
+            }
+        }
     }
 
     pub fn apply_color_scheme_at_cursor(&mut self) {
@@ -446,7 +688,7 @@ impl App {
             self.config.color_scheme = scheme;
             let _ = self.config.save();
             self.status_message = format!("Color scheme set to {}", scheme.label());
-            self.open_main_menu();
+            self.leave_nested_option();
         }
     }
 
@@ -566,7 +808,16 @@ impl App {
                         output_paths,
                         results,
                     } => {
-                        self.output_paths = output_paths;
+                        self.output_paths = output_paths.clone();
+                        self.config.last_investigation = LastInvestigation {
+                            input_path: if self.input_path.trim().is_empty() {
+                                None
+                            } else {
+                                Some(PathBuf::from(self.input_path.trim()))
+                            },
+                            output_paths,
+                        };
+                        let _ = self.config.save();
                         self.investigate_step = InvestigateStep::Done;
                         self.status_message =
                             format!("Complete — {results} result(s). Enter returns to menu.");
@@ -689,12 +940,58 @@ impl App {
             self.config.usage_profile = profile;
             let _ = self.config.save();
             self.status_message = format!("Usage profile set to {}", profile.short());
-            self.open_main_menu();
+            self.leave_nested_option();
         }
     }
 
-    pub fn options_items() -> &'static [&'static str] {
-        &["Manual rate limits…", "Clear all rate overrides"]
+    pub fn options_item_count() -> usize {
+        5
+    }
+
+    pub fn options_item_label(&self, index: usize) -> String {
+        match index {
+            0 => "Usage profile…".into(),
+            1 => "Color scheme…".into(),
+            2 => format!(
+                "Normalize & dedup inputs: {}",
+                if self.config.normalize_inputs {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+            3 => "Manual rate limits…".into(),
+            4 => "Clear all rate overrides".into(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn activate_options_item(&mut self) {
+        match self.options_index {
+            0 => {
+                self.options_nest = true;
+                self.open_profiles();
+            }
+            1 => {
+                self.options_nest = true;
+                self.open_color_scheme();
+            }
+            2 => {
+                self.config.normalize_inputs = !self.config.normalize_inputs;
+                let _ = self.config.save();
+                self.status_message = format!(
+                    "Normalize & dedup {}",
+                    if self.config.normalize_inputs {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+            }
+            3 => self.begin_rate_limit_warning(),
+            4 => self.clear_all_rate_overrides(),
+            _ => {}
+        }
     }
 
     pub fn begin_rate_limit_warning(&mut self) {

@@ -34,7 +34,32 @@ cargo install --path .
 scry
 ```
 
-Config and cached API keys live at `~/.config/scry/config.toml`. Investigation output defaults to `~/scry-output`. Legacy `~/.config/imbas/` or `~/.config/charon/` configs are migrated automatically on first launch.
+Config and cached API keys live at `~/.config/scry/config.toml`. The watch list is `~/.config/scry/watchlist.txt`. Investigation output defaults to `~/scry-output`. Legacy `~/.config/imbas/` or `~/.config/charon/` configs are migrated automatically on first launch.
+
+## Headless mode
+
+Run investigations without the TUI (uses the same config, keys, and rate profiles):
+
+```bash
+scry run -i indicators.txt
+scry run -i indicators.txt -o ~/scry-output --format both --verbosity normal
+scry run --watchlist
+scry run -i indicators.txt --vendors virustotal,abuseipdb --no-normalize
+scry run -i indicators.txt --watch --watch-interval 5
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-i` / `--input` | Indicator file |
+| `--watchlist` | Use `~/.config/scry/watchlist.txt` |
+| `-o` / `--output` | Output directory |
+| `--format` | `csv`, `raw`, or `both` (default) |
+| `--verbosity` | `quiet`, `normal`, or `verbose` |
+| `--vendors` | Comma-separated vendor ids for this run |
+| `--normalize` / `--no-normalize` | Override config normalize & dedup |
+| `--watch` | Re-run when the input file’s mtime changes |
+
+`scry` with no subcommand still launches the TUI.
 
 ## Tools utilized in tandem
 
@@ -45,8 +70,10 @@ Config and cached API keys live at `~/.config/scry/config.toml`. Investigation o
 | [Crossterm](https://github.com/crossterm-rs/crossterm) | Terminal backend, input, and alternate screen |
 | [Tokio](https://tokio.rs/) | Async runtime for concurrent vendor lookups |
 | [Reqwest](https://github.com/seanmonstar/reqwest) | HTTPS client for vendor APIs (rustls) |
+| [Clap](https://github.com/clap-rs/clap) | Headless CLI (`scry run`) |
 | Serde / TOML / CSV | Config persistence and result export |
 | [Arboard](https://github.com/1Password/arboard) | Clipboard copy from the output viewer |
+| [SecKC-MHN-Globe](https://github.com/n0xa/SecKC-MHN-Globe) | Earth bitmap + orthographic globe projection (BSD-2-Clause); geocode via SecKC MHN API |
 
 ## Vendors supported
 
@@ -65,15 +92,17 @@ Additional vendors plug in via the `OsintVendor` trait under `src/vendors/`.
 
 | Option | What it does |
 |--------|----------------|
-| **Run OSINT Investigation** | Pick an input file, review detected indicator types and vendor fit, choose output format/verbosity, then watch live progress with a threat-mix chart and intel tags |
+| **Investigate** | Pick an input file (or `w` for the watch list), review detected types and vendor fit, choose output format/verbosity, then watch live progress with a threat-mix chart and intel tags |
 | **View Output** | Browse `~/scry-output`; open CSV as a table or raw text; copy CSV/text (`c`), markdown (`m`), or the current row (`y` / `Y`) |
-| **Add / Edit Input** | Create or edit newline-separated indicator files (Ctrl+V paste, Ctrl+D delete line, Ctrl+S save) |
-| **Add / Remove / Change API Key** | Manage cached keys per vendor |
-| **List / Select Vendors** | Checkbox select; press `b` to bulk-enable every vendor that supports a given indicator type |
-| **Usage Profile** | Personal (free/community, default) or Enterprise (paid/premium pacing) |
-| **Options** | Manually override per-vendor rate limits (with warnings) |
-| **Color Scheme** | Pick a TUI theme |
+| **Edit Input** | Create or edit newline-separated indicator files (Ctrl+V paste, Ctrl+N normalize/dedup, Ctrl+D delete line, Ctrl+S save) |
+| **API Keys** | Manage cached keys per vendor |
+| **Vendors** | Checkbox select; press `b` to bulk-enable every vendor that supports a given indicator type |
+| **Watch List** | Edit the persistent watch list; Ctrl+I runs an investigation against it |
+| **World Map** | Plot IPs on a rotating 3D ASCII globe or static 2D map; load from last investigation, an input file, or an output file (`Tab` / `m` toggles views) |
+| **Options** | Usage profile, color scheme, normalize & dedup toggle, and per-vendor rate-limit overrides |
 | **Quit** | Exit Scry |
+
+Normalize & dedup (on by default) refangs common defanging (`hxxp`, `[.]`), strips URL schemes/paths to hosts, and drops duplicate indicators when loading files for investigation.
 
 ## License
 

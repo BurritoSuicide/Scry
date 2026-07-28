@@ -32,7 +32,7 @@ impl TextEditor {
             scroll: 0,
             dirty: false,
             is_new: false,
-            status: "type · Enter newline · Ctrl+V paste · Ctrl+D delete line · Ctrl+S save · Esc back"
+            status: "type · Ctrl+V paste · Ctrl+N normalize/dedup · Ctrl+D delete line · Ctrl+S save · Esc back"
                 .into(),
         })
     }
@@ -47,7 +47,7 @@ impl TextEditor {
             scroll: 0,
             dirty: true,
             is_new: true,
-            status: "new file · type · Ctrl+S save · Esc back (asks to save if dirty)".into(),
+            status: "new file · Ctrl+N normalize/dedup · Ctrl+S save · Esc back".into(),
         }
     }
 

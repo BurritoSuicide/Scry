@@ -33,6 +33,27 @@ pub struct Config {
     /// Manual per-vendor rate-limit overrides from the Options menu.
     #[serde(default)]
     pub rate_overrides: BTreeMap<String, RateLimitOverride>,
+
+    /// Paths from the most recent successful investigation (for World Map).
+    #[serde(default)]
+    pub last_investigation: LastInvestigation,
+
+    /// Refang/strip URLs and drop duplicate indicators when loading inputs.
+    #[serde(default = "default_true")]
+    pub normalize_inputs: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Persisted paths from the last completed investigation run.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LastInvestigation {
+    #[serde(default)]
+    pub input_path: Option<PathBuf>,
+    #[serde(default)]
+    pub output_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +134,8 @@ impl Default for Config {
             color_scheme: ColorScheme::default(),
             usage_profile: UsageProfile::Personal,
             rate_overrides: BTreeMap::new(),
+            last_investigation: LastInvestigation::default(),
+            normalize_inputs: true,
         }
     }
 }
@@ -229,5 +252,22 @@ impl Config {
 
     pub fn set_rate_override(&mut self, vendor_id: impl Into<String>, ovr: RateLimitOverride) {
         self.rate_overrides.insert(vendor_id.into(), ovr);
+    }
+
+    /// Persistent watch-list file (`~/.config/scry/watchlist.txt`).
+    pub fn watchlist_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("watchlist.txt"))
+    }
+
+    /// Ensure the watch-list file exists (empty is fine).
+    pub fn ensure_watchlist() -> Result<PathBuf> {
+        let path = Self::watchlist_path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if !path.exists() {
+            fs::write(&path, "")?;
+        }
+        Ok(path)
     }
 }

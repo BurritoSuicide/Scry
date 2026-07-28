@@ -3,11 +3,13 @@
 pub mod app;
 pub mod browser;
 pub mod clipboard;
+pub mod cli;
 pub mod config;
 pub mod editor;
 pub mod error;
 pub mod indicator;
 pub mod investigation;
+pub mod map;
 pub mod output;
 pub mod rate_limit;
 pub mod theme;

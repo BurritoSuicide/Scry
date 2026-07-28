@@ -10,6 +10,7 @@ keywords = ["osint", "tui", "virustotal", "investigation", "security"]
 categories = ["command-line-utilities"]
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 async-trait = "0.1"

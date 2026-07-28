@@ -1,9 +1,13 @@
 //! Indicator detection and classification.
 
 mod detect;
+mod normalize;
 mod subnet;
 
 pub use detect::{classify_line, detect_file, DetectionSummary};
+pub use normalize::{
+    classify_normalized, detect_file_with, normalize_and_dedup_lines, normalize_line, DetectOptions,
+};
 pub use subnet::{expand_cidr_to_first_ip, parse_cidr};
 
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,7 @@
 use anyhow::Context;
+use clap::Parser;
 use scry::app::App;
+use scry::cli::{Cli, Commands};
 use scry::config::Config;
 use scry::tui::{self, event::EventSource};
 use crossterm::event::{
@@ -16,7 +18,13 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
     let config = Config::load().context("failed to load Scry config")?;
+
+    if let Some(Commands::Run(args)) = cli.command {
+        return scry::cli::run_headless(config, args).await;
+    }
+
     let mut app = App::new(config);
 
     enable_raw_mode()?;
