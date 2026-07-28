@@ -12,6 +12,14 @@ cd Scry
 cargo run --release
 ```
 
+If you're on Github Codespaces:
+
+```
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+cargo run --release
+```
+
 > **Note:** rustc 1.97.1 can SIGSEGV during aggressive release codegen. Scry's release profile uses `opt-level = 1` and disables LTO; `.cargo/config.toml` raises `RUST_MIN_STACK` so `cargo build --release` succeeds on that toolchain.
 
 To install the binary onto your `PATH`:
