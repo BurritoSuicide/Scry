@@ -2,7 +2,10 @@
 
 A modular terminal UI for OSINT investigations. Scry takes newline-separated indicators (emails (coming soon), IPs, domains, JA4 fingerprints (TBD), hashes), routes them to selected vendors with personal or enterprise rate-limit profiles, and exports results as CSV and/or raw JSON dumps.
 
-<video src="demo/demonstration.mp4" width="320" height="240" controls></video>
+<video src="https://github.com/user-attachments/assets/b62d78df-a322-47dc-a3ee-b68a43d076fb" controls playsinline width="100%">
+  Your browser does not support the video tag.
+  <a href="demo/demonstration.mp4">Download the demo</a>
+</video>
 
 ## Installation
 
