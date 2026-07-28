@@ -1,14 +1,18 @@
 pub mod event;
+pub mod fx;
 pub mod theme;
 pub mod ui;
 pub mod widgets;
 
 use crate::app::{
-    ApiKeyMode, App, InvestigateStep, Screen,
+    ApiKeyMode, App, InvestigateStep, OptionsMode, Screen, VendorMode,
 };
 use crate::config::{OutputFormat, Verbosity};
+use crate::indicator::IndicatorType;
+use crate::rate_limit::UsageProfile;
 use crate::theme::ColorScheme;
 use crate::vendors::all_vendors;
+use crate::viewer::copy_to_clipboard;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use event::{AppEvent, EventSource};
@@ -25,10 +29,21 @@ pub async fn run<B: ratatui::backend::Backend>(
         terminal.draw(|frame| draw(frame, app))?;
 
         match events.next()? {
-            AppEvent::Tick => {}
+            AppEvent::Tick => {
+                // Redraw so tachyonfx ambient animations keep advancing.
+            }
             AppEvent::Key(key) => {
                 if handle_key(app, key) {
                     break;
+                }
+            }
+            AppEvent::Paste(text) => {
+                if app.screen == Screen::EditInput {
+                    if let Some(ed) = app.text_editor.as_mut() {
+                        ed.paste(&text);
+                        app.editor_discard_armed = false;
+                        app.status_message = ed.status.clone();
+                    }
                 }
             }
         }
@@ -41,7 +56,6 @@ pub async fn run<B: ratatui::backend::Backend>(
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
-    // Global quit
     if key.code == KeyCode::Char('q')
         && !is_text_entry(app)
         && key.modifiers == KeyModifiers::NONE
@@ -49,7 +63,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         app.should_quit = true;
         return true;
     }
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    // Global Ctrl+C quit — except Ctrl+C is also common cancel; keep quit.
+    // Ctrl+S / Ctrl+V handled in editor.
+    if key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && app.screen != Screen::EditInput
+        && app.screen != Screen::ViewOutput
+    {
         app.should_quit = true;
         return true;
     }
@@ -59,7 +79,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         Screen::Investigation => handle_investigation(app, key),
         Screen::ApiKeys => handle_api_keys(app, key),
         Screen::Vendors => handle_vendors(app, key),
+        Screen::Profiles => handle_profiles(app, key),
+        Screen::Options => handle_options(app, key),
         Screen::ColorScheme => handle_color_scheme(app, key),
+        Screen::ViewOutputBrowse => handle_view_output_browse(app, key),
+        Screen::ViewOutput => handle_view_output(app, key),
+        Screen::EditInputBrowse => handle_edit_input_browse(app, key),
+        Screen::EditInput => handle_edit_input(app, key),
+        Screen::EditInputNewName => handle_edit_input_new_name(app, key),
     }
     false
 }
@@ -68,7 +95,11 @@ fn is_text_entry(app: &App) -> bool {
     matches!(
         (app.screen, app.api_key_mode),
         (Screen::ApiKeys, ApiKeyMode::EnterKey)
-    )
+    ) || (app.screen == Screen::Options && app.rate_typing)
+        || matches!(
+            app.screen,
+            Screen::EditInput | Screen::EditInputNewName | Screen::ViewOutput
+        )
 }
 
 fn handle_main_menu(app: &mut App, key: KeyEvent) {
@@ -221,16 +252,395 @@ fn handle_api_keys(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_vendors(app: &mut App, key: KeyEvent) {
-    let n = all_vendors().len().max(1);
+    match app.vendor_mode {
+        VendorMode::List => {
+            let n = all_vendors().len().max(1);
+            match key.code {
+                KeyCode::Esc => app.open_main_menu(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.vendor_index = app.vendor_index.checked_sub(1).unwrap_or(n - 1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.vendor_index = (app.vendor_index + 1) % n;
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => app.toggle_vendor_at_cursor(),
+                KeyCode::Char('b') => app.enter_bulk_select_mode(),
+                _ => {}
+            }
+        }
+        VendorMode::BulkByType => {
+            let n = IndicatorType::all_known().len().max(1);
+            match key.code {
+                KeyCode::Esc => {
+                    app.vendor_mode = VendorMode::List;
+                    app.status_message =
+                        "↑↓ move · Space/Enter toggle · b bulk-by-type · Esc back".into();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.bulk_type_index = app.bulk_type_index.checked_sub(1).unwrap_or(n - 1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.bulk_type_index = (app.bulk_type_index + 1) % n;
+                }
+                KeyCode::Enter => app.bulk_select_type_at_cursor(),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn handle_profiles(app: &mut App, key: KeyEvent) {
+    let n = UsageProfile::all().len();
     match key.code {
         KeyCode::Esc => app.open_main_menu(),
         KeyCode::Up | KeyCode::Char('k') => {
-            app.vendor_index = app.vendor_index.checked_sub(1).unwrap_or(n - 1);
+            app.profile_index = app.profile_index.checked_sub(1).unwrap_or(n - 1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.vendor_index = (app.vendor_index + 1) % n;
+            app.profile_index = (app.profile_index + 1) % n;
         }
-        KeyCode::Enter | KeyCode::Char(' ') => app.toggle_vendor_at_cursor(),
+        KeyCode::Enter => app.apply_profile_at_cursor(),
+        _ => {}
+    }
+}
+
+fn handle_options(app: &mut App, key: KeyEvent) {
+    match app.options_mode {
+        OptionsMode::List => {
+            let n = App::options_items().len().max(1);
+            match key.code {
+                KeyCode::Esc => app.open_main_menu(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.options_index = app.options_index.checked_sub(1).unwrap_or(n - 1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.options_index = (app.options_index + 1) % n;
+                }
+                KeyCode::Enter => match app.options_index {
+                    0 => app.begin_rate_limit_warning(),
+                    1 => app.clear_all_rate_overrides(),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        OptionsMode::RateWarning => match key.code {
+            KeyCode::Esc => {
+                app.options_mode = OptionsMode::List;
+                app.status_message = "↑↓ · Enter · Esc back".into();
+            }
+            KeyCode::Enter => app.open_rate_vendor_list(),
+            _ => {}
+        },
+        OptionsMode::RateVendorList => {
+            let n = all_vendors().len().max(1);
+            match key.code {
+                KeyCode::Esc => {
+                    app.options_mode = OptionsMode::List;
+                    app.status_message = "↑↓ · Enter · Esc back".into();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.rate_vendor_index =
+                        app.rate_vendor_index.checked_sub(1).unwrap_or(n - 1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.rate_vendor_index = (app.rate_vendor_index + 1) % n;
+                }
+                KeyCode::Enter => app.begin_rate_edit_at_cursor(),
+                KeyCode::Char('d') => {
+                    if let Some(v) = all_vendors().get(app.rate_vendor_index) {
+                        app.config.clear_rate_override(v.id());
+                        let _ = app.config.save();
+                        app.status_message = format!("Cleared override for {}", v.name());
+                    }
+                }
+                _ => {}
+            }
+        }
+        OptionsMode::RateEdit => {
+            if app.rate_typing {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.rate_typing = false;
+                        app.rate_edit_input.clear();
+                        app.status_message = "Cancelled edit".into();
+                    }
+                    KeyCode::Enter => app.apply_rate_edit_input(),
+                    KeyCode::Backspace => {
+                        app.rate_edit_input.pop();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        app.rate_edit_input.push(c);
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            let n = App::rate_edit_fields().len();
+            match key.code {
+                KeyCode::Esc => {
+                    app.rate_edit_vendor = None;
+                    app.open_rate_vendor_list();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.rate_edit_field = app.rate_edit_field.checked_sub(1).unwrap_or(n - 1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.rate_edit_field = (app.rate_edit_field + 1) % n;
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => app.activate_rate_edit_field(),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn handle_view_output_browse(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.open_main_menu(),
+        KeyCode::Up | KeyCode::Char('k') => app.output_browser.move_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.output_browser.move_down(),
+        KeyCode::Right | KeyCode::Char('l') => {
+            if app
+                .output_browser
+                .selected_entry()
+                .is_some_and(|e| e.is_dir)
+            {
+                app.output_browser.enter();
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+            let _ = app.output_browser.leave();
+        }
+        KeyCode::Enter => app.open_selected_output_file(),
+        _ => {}
+    }
+}
+
+fn handle_view_output(app: &mut App, key: KeyEvent) {
+    let visible = app.view_visible_rows.max(1);
+    match key.code {
+        KeyCode::Esc => app.close_viewer(),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                v.move_up();
+                app.status_message = v.status.clone();
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                v.move_down(visible);
+                app.status_message = v.status.clone();
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                v.page_up(visible);
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                v.page_down(visible);
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                v.move_left();
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                v.move_right();
+            }
+        }
+        KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                let payload = v.copy_all_text();
+                let chars = payload.chars().count();
+                match copy_to_clipboard(&payload) {
+                    Ok(()) => {
+                        v.set_copied_status(&format!("csv/text ({chars} chars)"));
+                        app.status_message = v.status.clone();
+                    }
+                    Err(e) => app.status_message = e.to_string(),
+                }
+            }
+        }
+        KeyCode::Char('m') => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                let payload = v.copy_all_markdown();
+                let chars = payload.chars().count();
+                match copy_to_clipboard(&payload) {
+                    Ok(()) => {
+                        v.set_copied_status(&format!("markdown table ({chars} chars)"));
+                        app.status_message = v.status.clone();
+                    }
+                    Err(e) => app.status_message = e.to_string(),
+                }
+            }
+        }
+        KeyCode::Char('y') => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                let payload = v.copy_selection_text();
+                let chars = payload.chars().count();
+                match copy_to_clipboard(&payload) {
+                    Ok(()) => {
+                        v.set_copied_status(&format!("selection ({chars} chars)"));
+                        app.status_message = v.status.clone();
+                    }
+                    Err(e) => app.status_message = e.to_string(),
+                }
+            }
+        }
+        KeyCode::Char('Y') => {
+            if let Some(v) = app.file_viewer.as_mut() {
+                let payload = v.copy_selection_markdown();
+                let chars = payload.chars().count();
+                match copy_to_clipboard(&payload) {
+                    Ok(()) => {
+                        v.set_copied_status(&format!("row as markdown ({chars} chars)"));
+                        app.status_message = v.status.clone();
+                    }
+                    Err(e) => app.status_message = e.to_string(),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_edit_input_browse(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.open_main_menu(),
+        KeyCode::Up | KeyCode::Char('k') => app.input_browser.move_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.input_browser.move_down(),
+        KeyCode::Right | KeyCode::Char('l') => {
+            if app
+                .input_browser
+                .selected_entry()
+                .is_some_and(|e| e.is_dir)
+            {
+                app.input_browser.enter();
+                app.input_browser.select_best_indicator_file();
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+            if app.input_browser.leave() {
+                app.input_browser.select_best_indicator_file();
+            }
+        }
+        KeyCode::Enter => app.open_selected_input_file(),
+        KeyCode::Char('n') => app.begin_new_input_file(),
+        _ => {}
+    }
+}
+
+fn handle_edit_input_new_name(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.screen = Screen::EditInputBrowse;
+            app.status_message = "↑↓ · Enter edit · n new file · Esc menu".into();
+        }
+        KeyCode::Enter => app.confirm_new_input_file(),
+        KeyCode::Backspace => {
+            app.new_file_name.pop();
+        }
+        KeyCode::Char(c) if !c.is_control() => {
+            app.new_file_name.push(c);
+        }
+        _ => {}
+    }
+}
+
+fn handle_edit_input(app: &mut App, key: KeyEvent) {
+    let visible = app.view_visible_rows.max(1);
+    // Ctrl+S save
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(ed) = app.text_editor.as_mut() {
+            match ed.save() {
+                Ok(()) => {
+                    app.editor_discard_armed = false;
+                    app.status_message = ed.status.clone();
+                }
+                Err(e) => app.status_message = format!("Save failed: {e}"),
+            }
+        }
+        return;
+    }
+    // Ctrl+V paste from clipboard
+    if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(ed) = app.text_editor.as_mut() {
+            match ed.paste_from_clipboard() {
+                Ok(()) => {
+                    app.editor_discard_armed = false;
+                    app.status_message = ed.status.clone();
+                }
+                Err(e) => app.status_message = e.to_string(),
+            }
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => app.close_editor(false),
+        KeyCode::Up => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.move_up();
+                ed.ensure_visible(visible);
+            }
+        }
+        KeyCode::Down => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.move_down();
+                ed.ensure_visible(visible);
+            }
+        }
+        KeyCode::Left => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.move_left();
+            }
+        }
+        KeyCode::Right => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.move_right();
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.insert_newline();
+                ed.ensure_visible(visible);
+                app.editor_discard_armed = false;
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.backspace();
+                app.editor_discard_armed = false;
+            }
+        }
+        KeyCode::Delete => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.delete_forward();
+                app.editor_discard_armed = false;
+            }
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.delete_line();
+                app.editor_discard_armed = false;
+                app.status_message = ed.status.clone();
+            }
+        }
+        KeyCode::Char(c)
+            if key.modifiers == KeyModifiers::NONE
+                || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.insert_char(c);
+                ed.ensure_visible(visible);
+                app.editor_discard_armed = false;
+            }
+        }
         _ => {}
     }
 }

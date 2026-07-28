@@ -5,11 +5,16 @@
 //! 2. Add it to [`all_vendors`].
 //! 3. That's it — menus, key cache, and the runner pick it up automatically.
 
+pub mod abusech;
+pub mod abuseipdb;
+pub mod alienvault_otx;
+pub mod greynoise;
+pub mod hybrid_analysis;
 pub mod virustotal;
 
 use crate::error::Result;
 use crate::indicator::{Indicator, IndicatorType};
-use crate::rate_limit::RateLimitSpec;
+use crate::rate_limit::{RateLimitSpec, UsageProfile};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -64,6 +69,30 @@ impl VendorResult {
             error: Some(error.into()),
         }
     }
+
+    /// Threat coloring for the live results feed.
+    pub fn severity(&self) -> crate::indicator::ResultSeverity {
+        use crate::indicator::ResultSeverity;
+        if !self.success {
+            return ResultSeverity::Error;
+        }
+        let malicious = field_u64(&self.fields, "malicious");
+        let suspicious = field_u64(&self.fields, "suspicious");
+        if malicious > 0 {
+            ResultSeverity::Malicious
+        } else if suspicious > 0 {
+            ResultSeverity::Suspicious
+        } else {
+            ResultSeverity::Clean
+        }
+    }
+}
+
+fn field_u64(fields: &BTreeMap<String, String>, key: &str) -> u64 {
+    fields
+        .get(key)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Capability / suitability hint shown when the input mix is a poor fit.
@@ -84,7 +113,16 @@ pub trait OsintVendor: Send + Sync {
     /// Indicator types this vendor can usefully query.
     fn supported_types(&self) -> &[IndicatorType];
 
-    fn rate_limit(&self) -> RateLimitSpec;
+    /// Rate limit for a usage profile (personal vs enterprise).
+    fn rate_limit_for(&self, profile: UsageProfile) -> RateLimitSpec {
+        RateLimitSpec::for_vendor(self.id(), profile)
+            .unwrap_or_else(|| RateLimitSpec::per_minute(30))
+    }
+
+    /// Personal-tier shortcut (menus / defaults).
+    fn rate_limit(&self) -> RateLimitSpec {
+        self.rate_limit_for(UsageProfile::Personal)
+    }
 
     fn supports(&self, kind: IndicatorType) -> bool {
         self.supported_types().contains(&kind)
@@ -156,7 +194,14 @@ pub type VendorHandle = Arc<dyn OsintVendor>;
 
 /// Canonical list of built-in vendors. Append new vendors here.
 pub fn all_vendors() -> Vec<VendorHandle> {
-    vec![Arc::new(virustotal::VirusTotal::default())]
+    vec![
+        Arc::new(virustotal::VirusTotal::default()),
+        Arc::new(abusech::AbuseCh::default()),
+        Arc::new(hybrid_analysis::HybridAnalysis::default()),
+        Arc::new(abuseipdb::AbuseIpdb::default()),
+        Arc::new(greynoise::GreyNoise::default()),
+        Arc::new(alienvault_otx::AlienVaultOtx::default()),
+    ]
 }
 
 pub fn vendor_by_id(id: &str) -> Option<VendorHandle> {
@@ -167,5 +212,13 @@ pub fn selected_vendors(ids: &std::collections::BTreeSet<String>) -> Vec<VendorH
     all_vendors()
         .into_iter()
         .filter(|v| ids.contains(v.id()))
+        .collect()
+}
+
+/// Vendors that can query the given indicator type.
+pub fn vendors_for_type(kind: IndicatorType) -> Vec<VendorHandle> {
+    all_vendors()
+        .into_iter()
+        .filter(|v| v.supports(kind))
         .collect()
 }

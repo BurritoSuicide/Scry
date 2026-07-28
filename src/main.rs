@@ -1,8 +1,10 @@
 use anyhow::Context;
-use charon::app::App;
-use charon::config::Config;
-use charon::tui::{self, event::EventSource};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use scry::app::App;
+use scry::config::Config;
+use scry::tui::{self, event::EventSource};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -14,32 +16,39 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::load().context("failed to load Charon config")?;
+    let config = Config::load().context("failed to load Scry config")?;
     let mut app = App::new(config);
 
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let events = EventSource::new(Duration::from_millis(100));
+    // ~30 fps keeps tachyonfx fades / pulses smooth without burning CPU.
+    let events = EventSource::new(Duration::from_millis(33));
     let run_result = tui::run(&mut terminal, &mut app, &events).await;
 
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
 
     if let Err(err) = run_result {
-        eprintln!("Charon exited with error: {err:#}");
+        eprintln!("Scry exited with error: {err:#}");
         return Err(err);
     }
 
     // Persist any config changes made during the session.
-    app.config.save().context("failed to save Charon config")?;
+    app.config.save().context("failed to save Scry config")?;
     Ok(())
 }

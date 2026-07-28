@@ -1,16 +1,17 @@
 [package]
-name = "charon"
+name = "scry"
 version = "0.1.0"
 edition = "2021"
-description = "Charon — a modular TUI for OSINT investigations across emails, IPs, JA4 fingerprints, and hashes"
+description = "Scry — a modular TUI for OSINT investigations across emails, IPs, JA4 fingerprints, and hashes"
 license = "MIT"
-authors = ["Charon Contributors"]
+authors = ["Scry Contributors"]
 readme = "README.md"
 keywords = ["osint", "tui", "virustotal", "investigation", "security"]
 categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 crossterm = "0.28"
@@ -23,10 +24,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+# dsl unused — omit it to keep release LTO lighter (fat LTO has crashed rustc 1.97 + LLVM here).
+tachyonfx = { version = "0.20.1", default-features = false, features = ["std", "crossterm", "std-duration"] }
 toml = "0.8"
 unicode-width = "0.2"
 
 [profile.release]
-lto = true
+# Thin LTO: fat LTO (`lto = true`) has SIGSEGV'd rustc/LLVM during CallGraph on this crate graph.
+lto = "thin"
 codegen-units = 1
 strip = true

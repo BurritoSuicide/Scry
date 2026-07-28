@@ -1,4 +1,4 @@
-//! Color schemes and style helpers for Charon's TUI.
+//! Color schemes and style helpers for Scry's TUI.
 
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ColorScheme {
     #[default]
-    Charon,
+    #[serde(alias = "imbas", alias = "charon")]
+    Scry,
     Catppuccin,
     Nord,
     Dracula,
@@ -20,7 +21,7 @@ pub enum ColorScheme {
 impl ColorScheme {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Charon => "Charon (default)",
+            Self::Scry => "Scry (default)",
             Self::Catppuccin => "Catppuccin Mocha",
             Self::Nord => "Nord",
             Self::Dracula => "Dracula",
@@ -33,7 +34,7 @@ impl ColorScheme {
 
     pub fn all() -> &'static [ColorScheme] {
         &[
-            Self::Charon,
+            Self::Scry,
             Self::Catppuccin,
             Self::Nord,
             Self::Dracula,
@@ -46,9 +47,10 @@ impl ColorScheme {
 
     pub fn palette(self) -> Palette {
         match self {
-            Self::Charon => Palette {
+            Self::Scry => Palette {
                 bg: rgb(10, 14, 18),
                 panel: rgb(16, 22, 28),
+                panel_focus: rgb(22, 36, 40),
                 border: rgb(42, 64, 74),
                 border_focus: rgb(90, 196, 186),
                 title: rgb(232, 220, 196),
@@ -64,6 +66,7 @@ impl ColorScheme {
             Self::Catppuccin => Palette {
                 bg: rgb(30, 30, 46),
                 panel: rgb(24, 24, 37),
+                panel_focus: rgb(36, 36, 58),
                 border: rgb(69, 71, 90),
                 border_focus: rgb(137, 180, 250),
                 title: rgb(205, 214, 244),
@@ -79,6 +82,7 @@ impl ColorScheme {
             Self::Nord => Palette {
                 bg: rgb(46, 52, 64),
                 panel: rgb(59, 66, 82),
+                panel_focus: rgb(67, 76, 94),
                 border: rgb(76, 86, 106),
                 border_focus: rgb(136, 192, 208),
                 title: rgb(236, 239, 244),
@@ -94,6 +98,7 @@ impl ColorScheme {
             Self::Dracula => Palette {
                 bg: rgb(40, 42, 54),
                 panel: rgb(33, 34, 44),
+                panel_focus: rgb(48, 42, 66),
                 border: rgb(68, 71, 90),
                 border_focus: rgb(189, 147, 249),
                 title: rgb(248, 248, 242),
@@ -109,6 +114,7 @@ impl ColorScheme {
             Self::Github => Palette {
                 bg: rgb(13, 17, 23),
                 panel: rgb(22, 27, 34),
+                panel_focus: rgb(28, 36, 48),
                 border: rgb(48, 54, 61),
                 border_focus: rgb(88, 166, 255),
                 title: rgb(230, 237, 243),
@@ -124,6 +130,7 @@ impl ColorScheme {
             Self::RosePine => Palette {
                 bg: rgb(25, 23, 36),
                 panel: rgb(31, 29, 46),
+                panel_focus: rgb(42, 36, 58),
                 border: rgb(38, 35, 58),
                 border_focus: rgb(196, 167, 231),
                 title: rgb(224, 222, 244),
@@ -139,6 +146,7 @@ impl ColorScheme {
             Self::Gruvbox => Palette {
                 bg: rgb(40, 40, 40),
                 panel: rgb(50, 48, 47),
+                panel_focus: rgb(60, 54, 46),
                 border: rgb(80, 73, 69),
                 border_focus: rgb(215, 153, 33),
                 title: rgb(235, 219, 178),
@@ -154,6 +162,7 @@ impl ColorScheme {
             Self::TokyoNight => Palette {
                 bg: rgb(26, 27, 38),
                 panel: rgb(36, 40, 59),
+                panel_focus: rgb(42, 48, 74),
                 border: rgb(65, 72, 104),
                 border_focus: rgb(122, 162, 247),
                 title: rgb(192, 202, 245),
@@ -174,6 +183,8 @@ impl ColorScheme {
 pub struct Palette {
     pub bg: Color,
     pub panel: Color,
+    /// Elevated fill for the currently active panel (static highlight, not animated).
+    pub panel_focus: Color,
     pub border: Color,
     pub border_focus: Color,
     pub title: Color,
@@ -196,9 +207,23 @@ impl Palette {
         })
     }
 
+    pub fn panel_fill(self, focused: bool) -> Color {
+        if focused {
+            self.panel_focus
+        } else {
+            self.panel
+        }
+    }
+
     pub fn title_style(self) -> Style {
         Style::default()
             .fg(self.title)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn focused_title_style(self) -> Style {
+        Style::default()
+            .fg(self.accent)
             .add_modifier(Modifier::BOLD)
     }
 

@@ -1,4 +1,4 @@
-# Charon
+# Scry
 
 /target/
 .cargo-home/
@@ -7,4 +7,5 @@
 .vscode/
 *.swp
 .DS_Store
-charon-output/
+scry-output/
+imbas-output/

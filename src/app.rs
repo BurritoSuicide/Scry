@@ -1,13 +1,18 @@
-//! Application state machine driving Charon's screens.
+//! Application state machine driving Scry's screens.
 
 use crate::browser::FileBrowser;
 use crate::config::{Config, OutputFormat, Verbosity};
-use crate::indicator::DetectionSummary;
+use crate::editor::TextEditor;
+use crate::indicator::{DetectionSummary, IndicatorType};
 use crate::investigation::{
     preview_fit, InvestigationRequest, InvestigationStatus, LiveEvent, ProgressSnapshot,
 };
+use crate::rate_limit::{RateLimitOverride, RateLimitSpec, UsageProfile};
 use crate::theme::ColorScheme;
-use crate::vendors::{all_vendors, VendorFit};
+use crate::threat::ThreatBoard;
+use crate::tui::fx::FxEngine;
+use crate::vendors::{all_vendors, vendors_for_type, VendorFit};
+use crate::viewer::FileViewer;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -18,7 +23,15 @@ pub enum Screen {
     Investigation,
     ApiKeys,
     Vendors,
+    Profiles,
+    Options,
     ColorScheme,
+    ViewOutputBrowse,
+    ViewOutput,
+    EditInputBrowse,
+    EditInput,
+    /// Prompt for a new input filename.
+    EditInputNewName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +49,33 @@ pub enum ApiKeyMode {
     List,
     EnterKey,
     ConfirmClear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VendorMode {
+    List,
+    BulkByType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionsMode {
+    List,
+    /// Confirm warning before editing rate limits.
+    RateWarning,
+    /// Pick a vendor to override.
+    RateVendorList,
+    /// Edit fields for one vendor override.
+    RateEdit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateEditField {
+    PerMinute,
+    PerHour,
+    PerDay,
+    Unthrottled,
+    ClearOverride,
+    Save,
 }
 
 pub struct App {
@@ -58,8 +98,12 @@ pub struct App {
     pub verbosity_index: usize,
     pub progress: ProgressSnapshot,
     pub live_lines: Vec<String>,
+    /// Live malicious / suspicious / benign tallies + harvested tags.
+    pub threat_board: ThreatBoard,
     pub output_paths: Vec<PathBuf>,
     pub investigate_cursor: usize,
+    /// TachyonFX transitions + ambient panel / progress animations.
+    pub fx: FxEngine,
     investigation_tx: Option<mpsc::UnboundedReceiver<LiveEvent>>,
     investigation_handle: Option<JoinHandle<()>>,
 
@@ -70,11 +114,37 @@ pub struct App {
 
     // Vendors
     pub vendor_index: usize,
+    pub vendor_mode: VendorMode,
+    pub bulk_type_index: usize,
     pub pending_key_for_vendor: Option<String>,
+
+    // Profiles
+    pub profile_index: usize,
+
+    // Options / rate overrides
+    pub options_mode: OptionsMode,
+    pub options_index: usize,
+    pub rate_vendor_index: usize,
+    pub rate_edit_field: usize,
+    pub rate_edit_vendor: Option<String>,
+    pub rate_draft: RateLimitOverride,
+    pub rate_edit_input: String,
+    pub rate_typing: bool,
 
     // Color scheme picker
     pub color_scheme_index: usize,
     color_scheme_backup: ColorScheme,
+
+    // View output / edit input
+    pub output_browser: FileBrowser,
+    pub input_browser: FileBrowser,
+    pub file_viewer: Option<FileViewer>,
+    pub text_editor: Option<TextEditor>,
+    pub new_file_name: String,
+    /// Visible rows hint updated by the draw pass for scroll math.
+    pub view_visible_rows: usize,
+    /// Second Esc discards unsaved editor changes.
+    pub editor_discard_armed: bool,
 }
 
 impl App {
@@ -93,6 +163,10 @@ impl App {
             .position(|s| *s == config.color_scheme)
             .unwrap_or(0);
         let color_scheme_backup = config.color_scheme;
+        let profile_index = UsageProfile::all()
+            .iter()
+            .position(|p| *p == config.usage_profile)
+            .unwrap_or(0);
 
         Self {
             config,
@@ -110,25 +184,49 @@ impl App {
             verbosity_index,
             progress: ProgressSnapshot::default(),
             live_lines: Vec::new(),
+            threat_board: ThreatBoard::default(),
             output_paths: Vec::new(),
             investigate_cursor: 0,
+            fx: FxEngine::new(),
             investigation_tx: None,
             investigation_handle: None,
             api_key_mode: ApiKeyMode::List,
             api_key_index: 0,
             api_key_input: String::new(),
             vendor_index: 0,
+            vendor_mode: VendorMode::List,
+            bulk_type_index: 0,
             pending_key_for_vendor: None,
+            profile_index,
+            options_mode: OptionsMode::List,
+            options_index: 0,
+            rate_vendor_index: 0,
+            rate_edit_field: 0,
+            rate_edit_vendor: None,
+            rate_draft: RateLimitOverride::from_spec(RateLimitSpec::per_minute(30)),
+            rate_edit_input: String::new(),
+            rate_typing: false,
             color_scheme_index,
             color_scheme_backup,
+            output_browser: FileBrowser::new(PathBuf::from(default_output_dir())),
+            input_browser: FileBrowser::from_cwd(),
+            file_viewer: None,
+            text_editor: None,
+            new_file_name: String::new(),
+            view_visible_rows: 20,
+            editor_discard_armed: false,
         }
     }
 
     pub fn menu_items() -> &'static [&'static str] {
         &[
             "Run OSINT Investigation",
+            "View Output",
+            "Add / Edit Input",
             "Add / Remove / Change API Key",
             "List / Select Vendors",
+            "Usage Profile",
+            "Options",
             "Color Scheme",
             "Quit",
         ]
@@ -158,6 +256,7 @@ impl App {
         self.detection = None;
         self.vendor_fits.clear();
         self.live_lines.clear();
+        self.threat_board.clear();
         self.output_paths.clear();
         self.progress = ProgressSnapshot::default();
         self.file_browser = FileBrowser::from_cwd();
@@ -183,8 +282,26 @@ impl App {
 
     pub fn open_vendors(&mut self) {
         self.screen = Screen::Vendors;
+        self.vendor_mode = VendorMode::List;
         self.vendor_index = 0;
-        self.status_message = "↑↓ move · Space/Enter toggle · Esc back".into();
+        self.status_message =
+            "↑↓ move · Space/Enter toggle · b bulk-by-type · Esc back".into();
+    }
+
+    pub fn open_profiles(&mut self) {
+        self.screen = Screen::Profiles;
+        self.profile_index = UsageProfile::all()
+            .iter()
+            .position(|p| *p == self.config.usage_profile)
+            .unwrap_or(0);
+        self.status_message = "↑↓ choose profile · Enter apply · Esc back".into();
+    }
+
+    pub fn open_options(&mut self) {
+        self.screen = Screen::Options;
+        self.options_mode = OptionsMode::List;
+        self.options_index = 0;
+        self.status_message = "↑↓ · Enter · Esc back".into();
     }
 
     pub fn open_color_scheme(&mut self) {
@@ -205,12 +322,123 @@ impl App {
     pub fn activate_menu_item(&mut self) {
         match self.menu_index {
             0 => self.open_investigation(),
-            1 => self.open_api_keys(),
-            2 => self.open_vendors(),
-            3 => self.open_color_scheme(),
-            4 => self.should_quit = true,
+            1 => self.open_view_output(),
+            2 => self.open_edit_input(),
+            3 => self.open_api_keys(),
+            4 => self.open_vendors(),
+            5 => self.open_profiles(),
+            6 => self.open_options(),
+            7 => self.open_color_scheme(),
+            8 => self.should_quit = true,
             _ => {}
         }
+    }
+
+    pub fn open_view_output(&mut self) {
+        let dir = PathBuf::from(self.output_dir.trim());
+        let _ = std::fs::create_dir_all(&dir);
+        self.output_browser = FileBrowser::new(dir);
+        self.file_viewer = None;
+        self.screen = Screen::ViewOutputBrowse;
+        self.status_message =
+            "Browse investigation output · ↑↓ · Enter open · Esc menu".into();
+    }
+
+    pub fn open_edit_input(&mut self) {
+        self.input_browser = FileBrowser::from_cwd();
+        self.input_browser.select_best_indicator_file();
+        self.text_editor = None;
+        self.screen = Screen::EditInputBrowse;
+        self.status_message =
+            "↑↓ · Enter edit · n new file · Esc menu".into();
+    }
+
+    pub fn open_selected_output_file(&mut self) {
+        let Some(entry) = self.output_browser.selected_entry().cloned() else {
+            self.status_message = "No entry selected".into();
+            return;
+        };
+        if entry.is_dir {
+            self.output_browser.enter();
+            return;
+        }
+        match FileViewer::open(&entry.path) {
+            Ok(viewer) => {
+                self.status_message = viewer.status.clone();
+                self.file_viewer = Some(viewer);
+                self.screen = Screen::ViewOutput;
+            }
+            Err(e) => {
+                self.status_message = format!("Open failed: {e}");
+            }
+        }
+    }
+
+    pub fn open_selected_input_file(&mut self) {
+        let Some(entry) = self.input_browser.selected_entry().cloned() else {
+            self.status_message = "No entry selected".into();
+            return;
+        };
+        if entry.is_dir {
+            self.input_browser.enter();
+            self.input_browser.select_best_indicator_file();
+            return;
+        }
+        match TextEditor::open(&entry.path) {
+            Ok(editor) => {
+                self.status_message = editor.status.clone();
+                self.text_editor = Some(editor);
+                self.screen = Screen::EditInput;
+            }
+            Err(e) => {
+                self.status_message = format!("Open failed: {e}");
+            }
+        }
+    }
+
+    pub fn begin_new_input_file(&mut self) {
+        self.new_file_name = "indicators.txt".into();
+        self.screen = Screen::EditInputNewName;
+        self.status_message = "Enter filename · Enter create · Esc cancel".into();
+    }
+
+    pub fn confirm_new_input_file(&mut self) {
+        let name = self.new_file_name.trim();
+        if name.is_empty() {
+            self.status_message = "Filename was empty".into();
+            return;
+        }
+        let path = self.input_browser.cwd.join(name);
+        let editor = TextEditor::create_new(path);
+        self.status_message = editor.status.clone();
+        self.text_editor = Some(editor);
+        self.screen = Screen::EditInput;
+    }
+
+    pub fn close_viewer(&mut self) {
+        self.file_viewer = None;
+        self.screen = Screen::ViewOutputBrowse;
+        self.status_message =
+            "Browse investigation output · ↑↓ · Enter open · Esc menu".into();
+    }
+
+    pub fn close_editor(&mut self, force: bool) {
+        if !force {
+            if let Some(ed) = &self.text_editor {
+                if ed.dirty {
+                    if !self.editor_discard_armed {
+                        self.editor_discard_armed = true;
+                        self.status_message =
+                            "Unsaved changes · Ctrl+S save · Esc again to discard".into();
+                        return;
+                    }
+                }
+            }
+        }
+        self.editor_discard_armed = false;
+        self.text_editor = None;
+        self.screen = Screen::EditInputBrowse;
+        self.status_message = "↑↓ · Enter edit · n new file · Esc menu".into();
     }
 
     pub fn apply_color_scheme_at_cursor(&mut self) {
@@ -303,6 +531,7 @@ impl App {
         self.investigate_step = InvestigateStep::Running;
         self.progress.status = InvestigationStatus::Preparing;
         self.live_lines.clear();
+        self.threat_board.clear();
         self.status_message = "Investigation running… · Esc cancels view (task continues)".into();
 
         self.config.defaults.format = self.selected_format();
@@ -326,7 +555,8 @@ impl App {
                     LiveEvent::Progress(p) => {
                         self.progress = p;
                     }
-                    LiveEvent::ResultLine(line) => {
+                    LiveEvent::ResultHit { line, result } => {
+                        self.threat_board.ingest(&result);
                         self.live_lines.push(line);
                         if self.live_lines.len() > 200 {
                             self.live_lines.remove(0);
@@ -404,10 +634,224 @@ impl App {
             }
         }
     }
+
+    pub fn enter_bulk_select_mode(&mut self) {
+        self.vendor_mode = VendorMode::BulkByType;
+        self.bulk_type_index = 0;
+        self.status_message =
+            "Bulk-select · ↑↓ type · Enter enable all matching vendors · Esc cancel".into();
+    }
+
+    pub fn bulk_select_type_at_cursor(&mut self) {
+        let types = IndicatorType::all_known();
+        let Some(kind) = types.get(self.bulk_type_index).copied() else {
+            return;
+        };
+        let matching = vendors_for_type(kind);
+        if matching.is_empty() {
+            self.status_message = format!("No vendors support {}", kind.label());
+            self.vendor_mode = VendorMode::List;
+            return;
+        }
+        let mut missing_key: Option<String> = None;
+        let mut enabled = 0usize;
+        for v in &matching {
+            if !self.config.is_vendor_selected(v.id()) {
+                self.config.select_vendor(v.id());
+                enabled += 1;
+            }
+            if self.config.api_key(v.id()).is_none() && missing_key.is_none() {
+                missing_key = Some(v.id().to_string());
+            }
+        }
+        let _ = self.config.save();
+        self.vendor_mode = VendorMode::List;
+        self.status_message = format!(
+            "Enabled {} vendor(s) for {} indicators",
+            matching.len(),
+            kind.label()
+        );
+        if enabled == 0 {
+            self.status_message = format!(
+                "All {}-capable vendors were already selected",
+                kind.label()
+            );
+        }
+        if let Some(id) = missing_key {
+            self.begin_enter_api_key(&id);
+        }
+    }
+
+    pub fn apply_profile_at_cursor(&mut self) {
+        if let Some(profile) = UsageProfile::all().get(self.profile_index).copied() {
+            self.config.usage_profile = profile;
+            let _ = self.config.save();
+            self.status_message = format!("Usage profile set to {}", profile.short());
+            self.open_main_menu();
+        }
+    }
+
+    pub fn options_items() -> &'static [&'static str] {
+        &["Manual rate limits…", "Clear all rate overrides"]
+    }
+
+    pub fn begin_rate_limit_warning(&mut self) {
+        self.options_mode = OptionsMode::RateWarning;
+        self.status_message =
+            "⚠ Read the warning · Enter continue · Esc cancel".into();
+    }
+
+    pub fn open_rate_vendor_list(&mut self) {
+        self.options_mode = OptionsMode::RateVendorList;
+        self.rate_vendor_index = 0;
+        self.status_message =
+            "↑↓ vendor · Enter edit · d clear override · Esc back".into();
+    }
+
+    pub fn begin_rate_edit_at_cursor(&mut self) {
+        let vendors = all_vendors();
+        let Some(v) = vendors.get(self.rate_vendor_index) else {
+            return;
+        };
+        let id = v.id().to_string();
+        let draft = self
+            .config
+            .rate_overrides
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| {
+                RateLimitOverride::from_spec(self.config.effective_rate_limit(&id))
+            });
+        self.rate_edit_vendor = Some(id);
+        self.rate_draft = draft;
+        self.rate_edit_field = 0;
+        self.rate_edit_input.clear();
+        self.options_mode = OptionsMode::RateEdit;
+        self.status_message =
+            "↑↓ field · Enter edit/save · Esc cancel · numbers when editing".into();
+    }
+
+    pub fn rate_edit_fields() -> &'static [RateEditField] {
+        &[
+            RateEditField::PerMinute,
+            RateEditField::PerHour,
+            RateEditField::PerDay,
+            RateEditField::Unthrottled,
+            RateEditField::ClearOverride,
+            RateEditField::Save,
+        ]
+    }
+
+    pub fn activate_rate_edit_field(&mut self) {
+        let fields = Self::rate_edit_fields();
+        let Some(field) = fields.get(self.rate_edit_field).copied() else {
+            return;
+        };
+        match field {
+            RateEditField::Unthrottled => {
+                self.rate_draft.unthrottled = !self.rate_draft.unthrottled;
+            }
+            RateEditField::ClearOverride => {
+                if let Some(id) = self.rate_edit_vendor.take() {
+                    self.config.clear_rate_override(&id);
+                    let _ = self.config.save();
+                    self.status_message = format!("Cleared override for {id}");
+                }
+                self.open_rate_vendor_list();
+            }
+            RateEditField::Save => {
+                if let Some(id) = self.rate_edit_vendor.take() {
+                    if self.rate_draft.unthrottled {
+                        self.rate_draft.requests_per_minute =
+                            self.rate_draft.requests_per_minute.max(1);
+                    }
+                    self.config.set_rate_override(&id, self.rate_draft.clone());
+                    let _ = self.config.save();
+                    self.status_message = format!(
+                        "Saved rate override for {id} ({})",
+                        self.rate_draft.to_spec().display()
+                    );
+                }
+                self.open_rate_vendor_list();
+            }
+            RateEditField::PerMinute | RateEditField::PerHour | RateEditField::PerDay => {
+                self.rate_edit_input.clear();
+                self.rate_typing = true;
+                self.status_message = match field {
+                    RateEditField::PerMinute => "Type requests/minute · Enter apply".into(),
+                    RateEditField::PerHour => {
+                        "Type requests/hour (empty = none) · Enter apply".into()
+                    }
+                    RateEditField::PerDay => {
+                        "Type requests/day (empty = none) · Enter apply".into()
+                    }
+                    _ => unreachable!(),
+                };
+            }
+        }
+    }
+
+    pub fn apply_rate_edit_input(&mut self) {
+        let fields = Self::rate_edit_fields();
+        let Some(field) = fields.get(self.rate_edit_field).copied() else {
+            return;
+        };
+        let raw = self.rate_edit_input.trim();
+        match field {
+            RateEditField::PerMinute => {
+                if let Ok(n) = raw.parse::<u32>() {
+                    if n > 0 {
+                        self.rate_draft.requests_per_minute = n;
+                        self.rate_draft.unthrottled = false;
+                    }
+                }
+            }
+            RateEditField::PerHour => {
+                self.rate_draft.requests_per_hour = if raw.is_empty() {
+                    None
+                } else {
+                    raw.parse::<u32>().ok().filter(|n| *n > 0)
+                };
+                self.rate_draft.unthrottled = false;
+            }
+            RateEditField::PerDay => {
+                self.rate_draft.requests_per_day = if raw.is_empty() {
+                    None
+                } else {
+                    raw.parse::<u32>().ok().filter(|n| *n > 0)
+                };
+                self.rate_draft.unthrottled = false;
+            }
+            _ => {}
+        }
+        self.rate_edit_input.clear();
+        self.rate_typing = false;
+        self.status_message = "Value updated · ↑↓ fields · Save to persist".into();
+    }
+
+    pub fn clear_all_rate_overrides(&mut self) {
+        self.config.rate_overrides.clear();
+        let _ = self.config.save();
+        self.status_message = "Cleared all manual rate overrides".into();
+        self.options_mode = OptionsMode::List;
+    }
 }
 
 fn default_output_dir() -> String {
-    dirs::home_dir()
-        .map(|h| h.join("charon-output").display().to_string())
-        .unwrap_or_else(|| "./charon-output".into())
+    let home = dirs::home_dir();
+    let scry = home
+        .as_ref()
+        .map(|h| h.join("scry-output"))
+        .unwrap_or_else(|| PathBuf::from("./scry-output"));
+    // Prefer the new dir; fall back to leftover Imbas output if present.
+    let imbas = home.as_ref().map(|h| h.join("imbas-output"));
+    if scry.is_dir() {
+        return scry.display().to_string();
+    }
+    if let Some(legacy) = imbas {
+        if legacy.is_dir() {
+            return legacy.display().to_string();
+        }
+    }
+    scry.display().to_string()
 }

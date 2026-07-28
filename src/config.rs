@@ -1,6 +1,7 @@
-//! Persistent configuration: API keys, selected vendors, defaults.
+//! Persistent configuration: API keys, vendors, profiles, rate overrides.
 
-use crate::error::{CharonError, Result};
+use crate::error::{ScryError, Result};
+use crate::rate_limit::{RateLimitOverride, RateLimitSpec, UsageProfile};
 use crate::theme::ColorScheme;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +25,14 @@ pub struct Config {
     /// Active TUI color scheme.
     #[serde(default)]
     pub color_scheme: ColorScheme,
+
+    /// Personal (free) vs Enterprise (paid) rate-limit profile.
+    #[serde(default)]
+    pub usage_profile: UsageProfile,
+
+    /// Manual per-vendor rate-limit overrides from the Options menu.
+    #[serde(default)]
+    pub rate_overrides: BTreeMap<String, RateLimitOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,10 +108,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             api_keys: BTreeMap::new(),
-            // VirusTotal selected by default so first-run flow is obvious.
             selected_vendors: BTreeSet::from(["virustotal".to_string()]),
             defaults: OutputDefaults::default(),
             color_scheme: ColorScheme::default(),
+            usage_profile: UsageProfile::Personal,
+            rate_overrides: BTreeMap::new(),
         }
     }
 }
@@ -110,25 +120,45 @@ impl Default for Config {
 impl Config {
     pub fn config_dir() -> Result<PathBuf> {
         let base = dirs::config_dir().ok_or_else(|| {
-            CharonError::Config("could not resolve user config directory".into())
+            ScryError::Config("could not resolve user config directory".into())
         })?;
-        Ok(base.join("charon"))
+        Ok(base.join("scry"))
     }
 
     pub fn config_path() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("config.toml"))
     }
 
+    fn legacy_config_candidates() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Some(base) = dirs::config_dir() {
+            // Prefer the more recent Imbas path, then original Charon installs.
+            out.push(base.join("imbas").join("config.toml"));
+            out.push(base.join("charon").join("config.toml"));
+        }
+        out
+    }
+
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         if !path.exists() {
+            for legacy in Self::legacy_config_candidates() {
+                if legacy.exists() {
+                    let raw = fs::read_to_string(&legacy)?;
+                    let cfg: Config = toml::from_str(&raw).map_err(|e| {
+                        ScryError::Config(format!("parse legacy {}: {e}", legacy.display()))
+                    })?;
+                    cfg.save()?;
+                    return Ok(cfg);
+                }
+            }
             let cfg = Self::default();
             cfg.save()?;
             return Ok(cfg);
         }
         let raw = fs::read_to_string(&path)?;
         let cfg: Config = toml::from_str(&raw)
-            .map_err(|e| CharonError::Config(format!("parse {}: {e}", path.display())))?;
+            .map_err(|e| ScryError::Config(format!("parse {}: {e}", path.display())))?;
         Ok(cfg)
     }
 
@@ -137,7 +167,7 @@ impl Config {
         fs::create_dir_all(&dir)?;
         let path = dir.join("config.toml");
         let raw = toml::to_string_pretty(self)
-            .map_err(|e| CharonError::Config(format!("serialize config: {e}")))?;
+            .map_err(|e| ScryError::Config(format!("serialize config: {e}")))?;
         fs::write(path, raw)?;
         Ok(())
     }
@@ -177,7 +207,27 @@ impl Config {
         }
     }
 
+    pub fn select_vendor(&mut self, vendor_id: &str) {
+        self.selected_vendors.insert(vendor_id.to_string());
+    }
+
     pub fn selected_count(&self) -> usize {
         self.selected_vendors.len()
+    }
+
+    pub fn effective_rate_limit(&self, vendor_id: &str) -> RateLimitSpec {
+        crate::rate_limit::effective_rate_limit(
+            vendor_id,
+            self.usage_profile,
+            self.rate_overrides.get(vendor_id),
+        )
+    }
+
+    pub fn clear_rate_override(&mut self, vendor_id: &str) {
+        self.rate_overrides.remove(vendor_id);
+    }
+
+    pub fn set_rate_override(&mut self, vendor_id: impl Into<String>, ovr: RateLimitOverride) {
+        self.rate_overrides.insert(vendor_id.into(), ovr);
     }
 }

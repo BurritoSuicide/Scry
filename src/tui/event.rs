@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 pub enum AppEvent {
     Tick,
     Key(KeyEvent),
+    Paste(String),
 }
 
 pub struct EventSource {
@@ -19,10 +20,16 @@ impl EventSource {
 
         thread::spawn(move || loop {
             if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(CEvent::Key(key)) = event::read() {
-                    if key.kind == event::KeyEventKind::Press {
-                        let _ = tx_keys.send(AppEvent::Key(key));
+                match event::read() {
+                    Ok(CEvent::Key(key)) => {
+                        if key.kind == event::KeyEventKind::Press {
+                            let _ = tx_keys.send(AppEvent::Key(key));
+                        }
                     }
+                    Ok(CEvent::Paste(text)) => {
+                        let _ = tx_keys.send(AppEvent::Paste(text));
+                    }
+                    _ => {}
                 }
             }
         });

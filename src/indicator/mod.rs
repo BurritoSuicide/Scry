@@ -1,8 +1,10 @@
 //! Indicator detection and classification.
 
 mod detect;
+mod subnet;
 
 pub use detect::{classify_line, detect_file, DetectionSummary};
+pub use subnet::{expand_cidr_to_first_ip, parse_cidr};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -12,6 +14,7 @@ use std::fmt;
 pub enum IndicatorType {
     Email,
     IpAddress,
+    Domain,
     Ja4,
     Hash,
     Unknown,
@@ -22,6 +25,7 @@ impl IndicatorType {
         match self {
             Self::Email => "email",
             Self::IpAddress => "ip",
+            Self::Domain => "domain",
             Self::Ja4 => "ja4",
             Self::Hash => "hash",
             Self::Unknown => "unknown",
@@ -29,7 +33,13 @@ impl IndicatorType {
     }
 
     pub fn all_known() -> &'static [IndicatorType] {
-        &[Self::Email, Self::IpAddress, Self::Ja4, Self::Hash]
+        &[
+            Self::Email,
+            Self::IpAddress,
+            Self::Domain,
+            Self::Ja4,
+            Self::Hash,
+        ]
     }
 }
 
@@ -61,11 +71,15 @@ impl HashKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Indicator {
+    /// Value used for vendor queries (first IP when expanded from a subnet).
     pub raw: String,
     pub kind: IndicatorType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_kind: Option<HashKind>,
     pub line_no: usize,
+    /// Original CIDR string when `raw` was expanded from a subnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_subnet: Option<String>,
 }
 
 impl Indicator {
@@ -75,6 +89,7 @@ impl Indicator {
             kind,
             hash_kind: None,
             line_no,
+            from_subnet: None,
         }
     }
 
@@ -82,4 +97,19 @@ impl Indicator {
         self.hash_kind = Some(hash_kind);
         self
     }
+
+    pub fn with_subnet(mut self, cidr: impl Into<String>) -> Self {
+        self.from_subnet = Some(cidr.into());
+        self
+    }
+}
+
+/// How a live result line should be colored in the feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultSeverity {
+    Malicious,
+    Suspicious,
+    Clean,
+    Error,
+    Warning,
 }

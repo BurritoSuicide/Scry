@@ -1,5 +1,5 @@
 use crate::config::{Config, OutputFormat, Verbosity};
-use crate::error::{CharonError, Result};
+use crate::error::{ScryError, Result};
 use crate::indicator::{detect_file, DetectionSummary, Indicator};
 use crate::output;
 use crate::rate_limit::RateLimiter;
@@ -65,13 +65,26 @@ impl ProgressSnapshot {
             self.completed_queries as f64 / self.total_queries as f64
         }
     }
+
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.status,
+            InvestigationStatus::Preparing
+                | InvestigationStatus::Running
+                | InvestigationStatus::WaitingRateLimit { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum LiveEvent {
     Warning(String),
     Progress(ProgressSnapshot),
-    ResultLine(String),
+    /// Formatted feed line plus the raw vendor result for threat/tag panels.
+    ResultHit {
+        line: String,
+        result: VendorResult,
+    },
     Finished {
         output_paths: Vec<PathBuf>,
         results: usize,
@@ -108,7 +121,7 @@ async fn run_inner(
     let summary = detect_file(&request.input_path)?;
     let vendors = selected_vendors(&config.selected_vendors);
     if vendors.is_empty() {
-        return Err(CharonError::msg(
+        return Err(ScryError::msg(
             "no vendors selected — enable at least one in List / Select Vendors",
         ));
     }
@@ -146,7 +159,7 @@ async fn run_inner(
     }
 
     if plan.is_empty() {
-        return Err(CharonError::msg(
+        return Err(ScryError::msg(
             "nothing to query — check vendor selection, API keys, and indicator types",
         ));
     }
@@ -162,7 +175,8 @@ async fn run_inner(
 
     let mut limiters: HashMap<String, RateLimiter> = HashMap::new();
     for vendor in &vendors {
-        limiters.insert(vendor.id().to_string(), RateLimiter::new(vendor.rate_limit()));
+        let spec = config.effective_rate_limit(vendor.id());
+        limiters.insert(vendor.id().to_string(), RateLimiter::new(spec));
     }
 
     let mut results: Vec<VendorResult> = Vec::with_capacity(plan.len());
@@ -170,7 +184,7 @@ async fn run_inner(
     for (vendor, indicator) in plan {
         let key = config
             .api_key(vendor.id())
-            .ok_or_else(|| CharonError::MissingApiKey(vendor.id().into()))?
+            .ok_or_else(|| ScryError::MissingApiKey(vendor.id().into()))?
             .to_string();
 
         let limiter = limiters
@@ -194,7 +208,7 @@ async fn run_inner(
 
         let result = match vendor.lookup(&indicator, &key).await {
             Ok(r) => r,
-            Err(CharonError::RateLimited(_)) => {
+            Err(ScryError::RateLimited(_)) => {
                 // Back off a full minute and retry once.
                 snap.status = InvestigationStatus::WaitingRateLimit {
                     vendor: vendor.name().to_string(),
@@ -210,18 +224,29 @@ async fn run_inner(
             Err(e) => VendorResult::err(vendor.id(), &indicator, e.to_string()),
         };
 
-        let line = if result.success {
-            format!(
-                "✓ {} · {} → {}",
+        let line = match result.severity() {
+            crate::indicator::ResultSeverity::Malicious => format!(
+                "● {} · {} → {}",
                 result.vendor_id, result.indicator, result.summary
-            )
-        } else {
-            format!(
+            ),
+            crate::indicator::ResultSeverity::Suspicious => format!(
+                "◐ {} · {} → {}",
+                result.vendor_id, result.indicator, result.summary
+            ),
+            crate::indicator::ResultSeverity::Clean => format!(
+                "○ {} · {} → {}",
+                result.vendor_id, result.indicator, result.summary
+            ),
+            crate::indicator::ResultSeverity::Error => format!(
                 "✗ {} · {} → {}",
                 result.vendor_id,
                 result.indicator,
                 result.error.clone().unwrap_or_default()
-            )
+            ),
+            crate::indicator::ResultSeverity::Warning => format!(
+                "⚠ {} · {} → {}",
+                result.vendor_id, result.indicator, result.summary
+            ),
         };
 
         snap.recent_results.push(line.clone());
@@ -230,7 +255,10 @@ async fn run_inner(
         }
         snap.completed_queries += 1;
         snap.eta = estimate_eta(&snap, &limiters);
-        let _ = tx.send(LiveEvent::ResultLine(line));
+        let _ = tx.send(LiveEvent::ResultHit {
+            line,
+            result: result.clone(),
+        });
         let _ = tx.send(LiveEvent::Progress(snap.clone()));
 
         results.push(result);
@@ -313,7 +341,14 @@ fn estimate_eta(
     // Conservative: assume the slowest vendor pacing dominates.
     let min_rpm = limiters
         .values()
-        .map(|l| l.spec().requests_per_minute.max(1))
+        .map(|l| {
+            let s = l.spec();
+            if s.unthrottled {
+                10_000
+            } else {
+                s.requests_per_minute.max(1)
+            }
+        })
         .min()
         .unwrap_or(4);
     let secs = (remaining as u64).saturating_mul(60) / min_rpm as u64;

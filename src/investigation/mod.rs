@@ -3,6 +3,6 @@
 mod runner;
 
 pub use runner::{
-    preview_fit, run_investigation, InvestigationProgress, InvestigationRequest,
-    InvestigationStatus, LiveEvent, ProgressSnapshot,
+    preview_fit, InvestigationProgress, InvestigationRequest, InvestigationStatus, LiveEvent,
+    ProgressSnapshot, run_investigation,
 };

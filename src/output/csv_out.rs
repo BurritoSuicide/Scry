@@ -1,5 +1,5 @@
 use crate::config::Verbosity;
-use crate::error::{CharonError, Result};
+use crate::error::{ScryError, Result};
 use crate::vendors::VendorResult;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ pub fn write_csv(path: &Path, results: &[VendorResult], verbosity: Verbosity) ->
     match verbosity {
         Verbosity::Quiet => {
             wtr.write_record(["vendor", "indicator", "type", "success", "summary"])
-                .map_err(|e| CharonError::msg(e.to_string()))?;
+                .map_err(|e| ScryError::msg(e.to_string()))?;
             for r in results {
                 wtr.write_record([
                     r.vendor_id.as_str(),
@@ -24,7 +24,7 @@ pub fn write_csv(path: &Path, results: &[VendorResult], verbosity: Verbosity) ->
                         r.error.as_deref().unwrap_or("error")
                     },
                 ])
-                .map_err(|e| CharonError::msg(e.to_string()))?;
+                .map_err(|e| ScryError::msg(e.to_string()))?;
             }
         }
         Verbosity::Normal | Verbosity::Verbose => {
@@ -49,7 +49,7 @@ pub fn write_csv(path: &Path, results: &[VendorResult], verbosity: Verbosity) ->
                 header.push("raw_json".into());
             }
             wtr.write_record(&header)
-                .map_err(|e| CharonError::msg(e.to_string()))?;
+                .map_err(|e| ScryError::msg(e.to_string()))?;
 
             for r in results {
                 let mut row: Vec<String> = vec![
@@ -67,11 +67,11 @@ pub fn write_csv(path: &Path, results: &[VendorResult], verbosity: Verbosity) ->
                     row.push(r.raw.to_string());
                 }
                 wtr.write_record(&row)
-                    .map_err(|e| CharonError::msg(e.to_string()))?;
+                    .map_err(|e| ScryError::msg(e.to_string()))?;
             }
         }
     }
 
-    wtr.flush().map_err(|e| CharonError::msg(e.to_string()))?;
+    wtr.flush().map_err(|e| ScryError::msg(e.to_string()))?;
     Ok(path.to_path_buf())
 }

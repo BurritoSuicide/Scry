@@ -1,9 +1,9 @@
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, CharonError>;
+pub type Result<T> = std::result::Result<T, ScryError>;
 
 #[derive(Debug, Error)]
-pub enum CharonError {
+pub enum ScryError {
     #[error("{0}")]
     Message(String),
 
@@ -32,7 +32,7 @@ pub enum CharonError {
     RateLimited(String),
 }
 
-impl CharonError {
+impl ScryError {
     pub fn msg(s: impl Into<String>) -> Self {
         Self::Message(s.into())
     }

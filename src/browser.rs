@@ -155,14 +155,19 @@ impl FileBrowser {
 fn list_entries(dir: &Path) -> Vec<BrowserEntry> {
     let mut entries = Vec::new();
 
-    if let Some(parent) = dir.parent() {
-        entries.push(BrowserEntry {
-            name: "..".into(),
-            path: parent.to_path_buf(),
-            is_dir: true,
-            indicator_hits: None,
-            sample_lines: 0,
-        });
+    // Virtual parent entry when not at filesystem root.
+    if dir.parent().is_some_and(|p| !p.as_os_str().is_empty())
+        || dir.parent().is_some()
+    {
+        if let Some(parent) = dir.parent() {
+            entries.push(BrowserEntry {
+                name: "..".into(),
+                path: parent.to_path_buf(),
+                is_dir: true,
+                indicator_hits: None,
+                sample_lines: 0,
+            });
+        }
     }
 
     let Ok(read) = fs::read_dir(dir) else {
@@ -288,7 +293,7 @@ mod tests {
 
     fn tempfile_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "charon-browser-test-{}",
+            "scry-browser-test-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);

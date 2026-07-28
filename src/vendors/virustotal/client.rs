@@ -1,7 +1,6 @@
-use super::{public_rate_limit, SUPPORTED, VENDOR_ID, VENDOR_NAME};
-use crate::error::{CharonError, Result};
+use super::{SUPPORTED, VENDOR_ID, VENDOR_NAME};
+use crate::error::{ScryError, Result};
 use crate::indicator::{Indicator, IndicatorType};
-use crate::rate_limit::RateLimitSpec;
 use crate::vendors::{OsintVendor, VendorResult};
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -26,12 +25,13 @@ impl VirusTotal {
         match indicator.kind {
             IndicatorType::Hash => Ok(format!("{API_BASE}/files/{}", indicator.raw)),
             IndicatorType::IpAddress => Ok(format!("{API_BASE}/ip_addresses/{}", indicator.raw)),
+            IndicatorType::Domain => Ok(format!("{API_BASE}/domains/{}", indicator.raw)),
             IndicatorType::Email => {
                 // Public API has no first-class email object; use intelligence search.
                 let q = urlencoding_minimal(&format!("email:{}", indicator.raw));
                 Ok(format!("{API_BASE}/search?query={q}"))
             }
-            other => Err(CharonError::UnsupportedIndicator {
+            other => Err(ScryError::UnsupportedIndicator {
                 vendor: VENDOR_NAME.into(),
                 indicator_type: other.to_string(),
             }),
@@ -51,16 +51,16 @@ impl VirusTotal {
         let body = response.text().await.unwrap_or_default();
 
         if status == StatusCode::TOO_MANY_REQUESTS {
-            return Err(CharonError::RateLimited(VENDOR_ID.into()));
+            return Err(ScryError::RateLimited(VENDOR_ID.into()));
         }
         if status == StatusCode::NOT_FOUND {
             return Ok(serde_json::json!({
                 "data": null,
-                "charon_note": "not found in VirusTotal"
+                "scry_note": "not found in VirusTotal"
             }));
         }
         if !status.is_success() {
-            return Err(CharonError::msg(format!(
+            return Err(ScryError::msg(format!(
                 "VirusTotal HTTP {status}: {}",
                 truncate(&body, 240)
             )));
@@ -140,6 +140,37 @@ impl VirusTotal {
         (summary, fields)
     }
 
+    fn summarize_domain(raw: &Value) -> (String, BTreeMap<String, String>) {
+        let mut fields = BTreeMap::new();
+        let attrs = &raw["data"]["attributes"];
+        let stats = &attrs["last_analysis_stats"];
+
+        let malicious = stats["malicious"].as_u64().unwrap_or(0);
+        let suspicious = stats["suspicious"].as_u64().unwrap_or(0);
+
+        fields.insert("malicious".into(), malicious.to_string());
+        fields.insert("suspicious".into(), suspicious.to_string());
+        if let Some(r) = attrs["reputation"].as_i64() {
+            fields.insert("reputation".into(), r.to_string());
+        }
+        if let Some(cats) = attrs["categories"].as_object() {
+            let joined = cats
+                .values()
+                .filter_map(|v| v.as_str())
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !joined.is_empty() {
+                fields.insert("categories".into(), joined);
+            }
+        }
+
+        let summary = format!(
+            "domain reputation: {malicious} malicious / {suspicious} suspicious"
+        );
+        (summary, fields)
+    }
+
     fn summarize_search(raw: &Value) -> (String, BTreeMap<String, String>) {
         let mut fields = BTreeMap::new();
         let count = raw["data"]
@@ -170,15 +201,11 @@ impl OsintVendor for VirusTotal {
         SUPPORTED
     }
 
-    fn rate_limit(&self) -> RateLimitSpec {
-        public_rate_limit()
-    }
-
     async fn lookup(&self, indicator: &Indicator, api_key: &str) -> Result<VendorResult> {
         let url = Self::endpoint_for(indicator)?;
         let raw = self.get_json(&url, api_key).await?;
 
-        if raw.get("charon_note").and_then(|v| v.as_str()) == Some("not found in VirusTotal") {
+        if raw.get("scry_note").and_then(|v| v.as_str()) == Some("not found in VirusTotal") {
             let mut fields = BTreeMap::new();
             fields.insert("status".into(), "not_found".into());
             return Ok(VendorResult::ok(
@@ -193,9 +220,10 @@ impl OsintVendor for VirusTotal {
         let (summary, fields) = match indicator.kind {
             IndicatorType::Hash => Self::summarize_file(&raw),
             IndicatorType::IpAddress => Self::summarize_ip(&raw),
+            IndicatorType::Domain => Self::summarize_domain(&raw),
             IndicatorType::Email => Self::summarize_search(&raw),
             other => {
-                return Err(CharonError::UnsupportedIndicator {
+                return Err(ScryError::UnsupportedIndicator {
                     vendor: VENDOR_NAME.into(),
                     indicator_type: other.to_string(),
                 });
