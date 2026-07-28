@@ -591,7 +591,9 @@ impl App {
         self.api_key_input.clear();
         self.api_key_mode = ApiKeyMode::EnterKey;
         self.screen = Screen::ApiKeys;
-        self.status_message = format!("Paste API key for {vendor_id} · Enter save · Esc cancel");
+        self.status_message = format!(
+            "Paste API key for {vendor_id} · Ctrl+V / paste · Enter save · Esc cancel"
+        );
     }
 
     pub fn save_api_key_input(&mut self) {

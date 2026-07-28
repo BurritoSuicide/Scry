@@ -24,13 +24,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
-# dsl unused — omit it to keep release LTO lighter (fat LTO has crashed rustc 1.97 + LLVM here).
+# dsl unused — omit unused tachyonfx features (lighter compile / less LLVM work).
 tachyonfx = { version = "0.20.1", default-features = false, features = ["std", "crossterm", "std-duration"] }
 toml = "0.8"
 unicode-width = "0.2"
 
 [profile.release]
-# Thin LTO: fat LTO (`lto = true`) has SIGSEGV'd rustc/LLVM during CallGraph on this crate graph.
-lto = "thin"
-codegen-units = 1
+# rustc 1.97.1 + LLVM 22 SIGSEGVs at opt-level 2/3 and with thin/fat LTO on this
+# crate graph (SelectionDAG / MCAssembler). Keep LTO off and opt-level 1 until
+# the toolchain recovers. See also `.cargo/config.toml` (`RUST_MIN_STACK`).
+lto = false
+opt-level = 1
+codegen-units = 16
 strip = true

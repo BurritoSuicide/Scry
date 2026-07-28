@@ -37,15 +37,7 @@ pub async fn run<B: ratatui::backend::Backend>(
                     break;
                 }
             }
-            AppEvent::Paste(text) => {
-                if app.screen == Screen::EditInput {
-                    if let Some(ed) = app.text_editor.as_mut() {
-                        ed.paste(&text);
-                        app.editor_discard_armed = false;
-                        app.status_message = ed.status.clone();
-                    }
-                }
-            }
+            AppEvent::Paste(text) => handle_paste(app, &text),
         }
 
         if app.should_quit {
@@ -100,6 +92,51 @@ fn is_text_entry(app: &App) -> bool {
             app.screen,
             Screen::EditInput | Screen::EditInputNewName | Screen::ViewOutput
         )
+}
+
+fn handle_paste(app: &mut App, text: &str) {
+    match app.screen {
+        Screen::EditInput => {
+            if let Some(ed) = app.text_editor.as_mut() {
+                ed.paste(text);
+                app.editor_discard_armed = false;
+                app.status_message = ed.status.clone();
+            }
+        }
+        Screen::ApiKeys if app.api_key_mode == ApiKeyMode::EnterKey => {
+            paste_into_api_key(app, text);
+        }
+        Screen::EditInputNewName => {
+            let cleaned: String = text
+                .chars()
+                .filter(|c| *c != '\n' && *c != '\r')
+                .collect();
+            app.new_file_name.push_str(&cleaned);
+        }
+        _ => {}
+    }
+}
+
+/// API keys are single-line secrets; take the first non-empty line and trim.
+fn sanitize_api_key_paste(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn paste_into_api_key(app: &mut App, text: &str) {
+    let cleaned = sanitize_api_key_paste(text);
+    if cleaned.is_empty() {
+        app.status_message = "Clipboard/paste was empty".into();
+        return;
+    }
+    app.api_key_input.push_str(&cleaned);
+    app.status_message = format!(
+        "Pasted {} char(s) · Enter save · Esc cancel",
+        cleaned.chars().count()
+    );
 }
 
 fn handle_main_menu(app: &mut App, key: KeyEvent) {
@@ -214,8 +251,10 @@ fn handle_api_keys(app: &mut App, key: KeyEvent) {
                         app.pending_key_for_vendor = Some(v.id().to_string());
                         app.api_key_input.clear();
                         app.api_key_mode = ApiKeyMode::EnterKey;
-                        app.status_message =
-                            format!("Enter API key for {} · Enter save · Esc cancel", v.name());
+                        app.status_message = format!(
+                            "Enter API key for {} · Ctrl+V / paste · Enter save · Esc cancel",
+                            v.name()
+                        );
                     }
                 }
                 KeyCode::Char('d') => {
@@ -229,20 +268,36 @@ fn handle_api_keys(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
         }
-        ApiKeyMode::EnterKey => match key.code {
-            KeyCode::Esc => {
-                app.api_key_mode = ApiKeyMode::List;
-                app.api_key_input.clear();
-                app.pending_key_for_vendor = None;
-                app.status_message = "Cancelled key entry".into();
+        ApiKeyMode::EnterKey => {
+            if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                match crate::clipboard::paste_text() {
+                    Ok(text) => paste_into_api_key(app, &text),
+                    Err(e) => app.status_message = e.to_string(),
+                }
+                return;
             }
-            KeyCode::Enter => app.save_api_key_input(),
-            KeyCode::Backspace => {
-                app.api_key_input.pop();
+            match key.code {
+                KeyCode::Esc => {
+                    app.api_key_mode = ApiKeyMode::List;
+                    app.api_key_input.clear();
+                    app.pending_key_for_vendor = None;
+                    app.status_message = "Cancelled key entry".into();
+                }
+                KeyCode::Enter => app.save_api_key_input(),
+                KeyCode::Backspace => {
+                    app.api_key_input.pop();
+                }
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                =>
+                {
+                    app.api_key_input.push(c);
+                }
+                _ => {}
             }
-            KeyCode::Char(c) => app.api_key_input.push(c),
-            _ => {}
-        },
+        }
         ApiKeyMode::ConfirmClear => {
             if key.code == KeyCode::Esc {
                 app.api_key_mode = ApiKeyMode::List;

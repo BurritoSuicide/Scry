@@ -1,0 +1,4 @@
+# rustc 1.97.1 / LLVM 22 can SIGSEGV during release codegen on small thread stacks.
+# Cargo inherits this for rustc worker threads.
+[env]
+RUST_MIN_STACK = "67108864"

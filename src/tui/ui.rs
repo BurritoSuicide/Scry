@@ -595,6 +595,10 @@ fn draw_api_keys(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Palette) {
                 ]),
                 Line::from(""),
                 Line::from(Span::styled(
+                    "Ctrl+V or terminal paste · Enter save · Esc cancel",
+                    theme.muted_style(),
+                )),
+                Line::from(Span::styled(
                     "Stored in ~/.config/scry/config.toml",
                     theme.muted_style(),
                 )),
